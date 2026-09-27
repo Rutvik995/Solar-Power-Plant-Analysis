@@ -1,0 +1,12 @@
+langgraph>=0.2.0
+langchain>=0.3.0
+langchain-openai>=0.2.0
+langchain-core>=0.3.0
+pydantic>=2.0.0
+psycopg2-binary
+sqlalchemy>=2.0.0
+pandas>=2.0.0            # install via: pacman -S mingw-w64-ucrt-x86_64-python-pandas
+numpy>=1.26.0            # install via: pacman -S mingw-w64-ucrt-x86_64-python-numpy
+scikit-learn>=1.4.0      # install via: pacman -S mingw-w64-ucrt-x86_64-python-scikit-learn
+rich>=13.0.0
+python-dotenv>=1.0.0
