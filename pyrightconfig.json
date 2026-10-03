@@ -1,0 +1,15 @@
+{
+  "pythonVersion": "3.12",
+  "pythonPlatform": "Windows",
+  "venvPath": ".",
+  "pythonPath": "C:/Users/rutvik/AppData/Local/Programs/Python/Python312/python.exe",
+  "include": [
+    "."
+  ],
+  "exclude": [
+    "venv",
+    ".git"
+  ],
+  "typeCheckingMode": "basic",
+  "reportMissingModuleSource": "none"
+}
