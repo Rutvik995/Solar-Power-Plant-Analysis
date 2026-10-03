@@ -29,10 +29,26 @@ else:
     pprint.pprint(result)
     
     data_ref = result["data_ref"]
+    df = DataStore.get(data_ref)
+    
+    print("\n--- Status Code Counts ---")
+    if "status_code" in df.columns:
+        print(df["status_code"].value_counts().to_dict())
+        
+    print("\n--- Soiling Ratio Range ---")
+    if "soiling_ratio" in df.columns:
+        print(f"Min: {df['soiling_ratio'].min():.4f}, Avg: {df['soiling_ratio'].mean():.4f}, Max: {df['soiling_ratio'].max():.4f}")
     
     # 2. Performance
     print("\n--- compute_kpis (plant, total) ---")
     pprint.pprint(compute_kpis(data_ref, level="plant", period="total"))
+    
+    print("\n--- compute_kpis (inverter, total) ---")
+    inv_kpis = compute_kpis(data_ref, level="inverter", period="total")
+    df_inv = DataStore.get(inv_kpis["data_ref"])
+    if "performance_ratio" in df_inv.columns:
+        pr_col = df_inv["performance_ratio"]
+        print(f"Inverter PR -> Min: {pr_col.min():.4f}, Median: {pr_col.median():.4f}, Max: {pr_col.max():.4f}")
     
     # 3. Faults
     print("\n--- detect_zero_generation ---")

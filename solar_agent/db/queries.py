@@ -58,6 +58,25 @@ def get_max_log_date() -> date:
     return result  # already a datetime.date from psycopg
 
 
+GET_MIN_LOG_DATE_SQL = """
+SELECT LEAST(
+    (SELECT MIN(log_date) FROM daily_inverter_telemetry),
+    (SELECT MIN(log_date) FROM daily_weather_telemetry)
+) AS min_log_date
+"""
+
+def get_min_log_date() -> date:
+    """
+    Returns the earliest log_date present in either telemetry table.
+    """
+    engine = get_sync_engine()
+    with engine.connect() as conn:
+        result = conn.execute(text(GET_MIN_LOG_DATE_SQL)).scalar()
+    if result is None:
+        return date(2000, 1, 1)
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Entity resolution queries
 # ---------------------------------------------------------------------------

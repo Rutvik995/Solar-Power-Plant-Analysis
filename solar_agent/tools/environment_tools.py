@@ -40,23 +40,29 @@ def estimate_soiling_loss(data_ref: str) -> dict[str, Any]:
     df = m.compute_soiling_loss(df)
     
     # Sort for time-series analysis
-    # Assuming plant-level data, or we group by inverter/block/plant
-    group_cols = [c for c in ["plant_id", "block_id", "inverter_id"] if c in df.columns]
-    df = df.sort_values(by=group_cols + ["log_date"])
-    
     # Detect cleaning events: day-over-day increase in soiling ratio > threshold
     JUMP_THRESHOLD = settings.soiling_cleaning_jump_threshold
     
-    if group_cols:
-        df["prev_soiling_ratio"] = df.groupby(group_cols)["soiling_ratio"].shift(1)
+    # Aggregate to plant-day level for cleaning event detection
+    if "plant_id" in df.columns:
+        plant_daily = df.groupby(["plant_id", "log_date"], as_index=False)["soiling_ratio"].mean()
+        plant_daily = plant_daily.sort_values(["plant_id", "log_date"])
+        plant_daily["prev_soiling_ratio"] = plant_daily.groupby("plant_id")["soiling_ratio"].shift(1)
     else:
-        df["prev_soiling_ratio"] = df["soiling_ratio"].shift(1)
+        plant_daily = df.groupby(["log_date"], as_index=False)["soiling_ratio"].mean()
+        plant_daily = plant_daily.sort_values("log_date")
+        plant_daily["prev_soiling_ratio"] = plant_daily["soiling_ratio"].shift(1)
         
-    df["soiling_ratio_jump"] = df["soiling_ratio"] - df["prev_soiling_ratio"]
-    df["is_cleaning_event"] = df["soiling_ratio_jump"] > JUMP_THRESHOLD
+    plant_daily["soiling_ratio_jump"] = plant_daily["soiling_ratio"] - plant_daily["prev_soiling_ratio"]
+    plant_daily["is_cleaning_event"] = plant_daily["soiling_ratio_jump"] > JUMP_THRESHOLD
     
-    cleaning_events = int(df["is_cleaning_event"].sum())
+    cleaning_events = int(plant_daily["is_cleaning_event"].sum())
     total_loss_kwh = float(df["soiling_energy_loss_kwh"].sum())
+    total_yield = float(df["total_daily_yield_kwh"].sum())
+
+    warnings = []
+    if total_yield > 0 and total_loss_kwh > 0.15 * total_yield:
+        warnings.append(f"High soiling loss detected (>15% of yield). Estimated loss: {total_loss_kwh:.1f} kWh")
 
     res_ref = DataStore.store(df)
     
@@ -67,7 +73,7 @@ def estimate_soiling_loss(data_ref: str) -> dict[str, Any]:
             "cleaning_events_detected": cleaning_events
         },
         "data_ref": res_ref,
-        "warnings": [],
+        "warnings": warnings,
     }
 
 
@@ -111,14 +117,15 @@ def analyze_weather_correlation(data_ref: str) -> dict[str, Any]:
     else:
         warnings.append("Missing max_module_temp_c column.")
 
-    # 2. Irradiance vs Yield
-    if "total_solar_radiation_kwh_m2" in df.columns and "total_daily_yield_kwh" in df.columns:
-        irr_df = df.dropna(subset=["total_solar_radiation_kwh_m2", "total_daily_yield_kwh"])
+    # 2. Irradiance vs Specific Yield
+    if "total_solar_radiation_kwh_m2" in df.columns and "total_daily_yield_kwh" in df.columns and "rated_dc_kw" in df.columns:
+        df["specific_yield"] = df["total_daily_yield_kwh"] / df["rated_dc_kw"]
+        irr_df = df.dropna(subset=["total_solar_radiation_kwh_m2", "specific_yield"])
         if len(irr_df) > 5:
             if len(irr_df) < 14:
                 warnings.append(f"Small sample size for Irradiance vs Yield regression: {len(irr_df)} valid days.")
             slope, intercept, r_value, p_value, std_err = linregress(
-                irr_df["total_solar_radiation_kwh_m2"], irr_df["total_daily_yield_kwh"]
+                irr_df["total_solar_radiation_kwh_m2"], irr_df["specific_yield"]
             )
             metrics["irradiance_yield_r2"] = r_value ** 2
         else:

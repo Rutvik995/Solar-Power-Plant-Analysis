@@ -272,141 +272,173 @@ def resolve_date_range(text: str) -> dict:
             return d.replace(year=d.year + 1, month=1, day=1) - timedelta(days=1)
         return d.replace(month=d.month + 1, day=1) - timedelta(days=1)
 
-    start: date
-    end: date = today
-    assumption: str
+    def _parse(t: str) -> tuple[date, date, str]:
+        start: date
+        end: date = today
+        assumption: str
 
-    # --- Explicit YYYY-MM-DD to YYYY-MM-DD ---
-    explicit = re.search(
-        r"(\d{4}-\d{2}-\d{2})\s+(?:to|through|–|-)\s+(\d{4}-\d{2}-\d{2})", t
-    )
-    if explicit:
-        start = date.fromisoformat(explicit.group(1))
-        end = date.fromisoformat(explicit.group(2))
-        assumption = f"Explicit date range: {_fmt(start)} to {_fmt(end)}"
-        return {"start_date": _fmt(start), "end_date": _fmt(end), "today": _fmt(today), "assumption": assumption}
+        # --- Explicit YYYY-MM-DD to YYYY-MM-DD ---
+        explicit = re.search(
+            r"(\d{4}-\d{2}-\d{2})\s+(?:to|through|–|-)\s+(\d{4}-\d{2}-\d{2})", t
+        )
+        if explicit:
+            start = date.fromisoformat(explicit.group(1))
+            end = date.fromisoformat(explicit.group(2))
+            assumption = f"Explicit date range: {_fmt(start)} to {_fmt(end)}"
+            return start, end, assumption
 
-    # --- Quarter expressions: "Q1 2025", "q2 2024" ---
-    quarter_match = re.search(r"q([1-4])\s+(\d{4})", t)
-    if quarter_match:
-        q_num = int(quarter_match.group(1))
-        year = int(quarter_match.group(2))
-        q_start_month = (q_num - 1) * 3 + 1
-        start = date(year, q_start_month, 1)
-        end_month = q_start_month + 2
-        end = _last_of_month(date(year, end_month, 1))
-        assumption = f"Interpreted '{text}' as Q{q_num} {year}: {_fmt(start)} to {_fmt(end)}"
-        return {"start_date": _fmt(start), "end_date": _fmt(end), "today": _fmt(today), "assumption": assumption}
+        # --- Quarter expressions: "Q1 2025", "q2 2024" ---
+        quarter_match = re.search(r"q([1-4])\s+(\d{4})", t)
+        if quarter_match:
+            q_num = int(quarter_match.group(1))
+            year = int(quarter_match.group(2))
+            q_start_month = (q_num - 1) * 3 + 1
+            start = date(year, q_start_month, 1)
+            end_month = q_start_month + 2
+            end = _last_of_month(date(year, end_month, 1))
+            assumption = f"Interpreted '{text}' as Q{q_num} {year}: {_fmt(start)} to {_fmt(end)}"
+            return start, end, assumption
 
-    # --- "last N days" / "past N days" ---
-    n_days_match = re.search(r"(?:last|past)\s+(\d+)\s+days?", t)
-    if n_days_match:
-        n = int(n_days_match.group(1))
-        start = today - timedelta(days=n - 1)
-        end = today
-        assumption = f"Interpreted '{text}' as last {n} days: {_fmt(start)} to {_fmt(end)}"
-        return {"start_date": _fmt(start), "end_date": _fmt(end), "today": _fmt(today), "assumption": assumption}
+        # --- "last N days" / "past N days" ---
+        n_days_match = re.search(r"(?:last|past)\s+(\d+)\s+days?", t)
+        if n_days_match:
+            n = int(n_days_match.group(1))
+            start = today - timedelta(days=n - 1)
+            end = today
+            assumption = f"Interpreted '{text}' as last {n} days: {_fmt(start)} to {_fmt(end)}"
+            return start, end, assumption
 
-    # --- "last N months" ---
-    n_months_match = re.search(r"(?:last|past)\s+(\d+)\s+months?", t)
-    if n_months_match:
-        n = int(n_months_match.group(1))
-        # Go back n months from first of this month
-        this_month_first = _first_of_month(today)
-        month = this_month_first.month - n
-        year = this_month_first.year + (month - 1) // 12
-        month = ((month - 1) % 12) + 1
-        start = date(year, month, 1)
-        end = today
-        assumption = f"Interpreted '{text}' as last {n} months: {_fmt(start)} to {_fmt(end)}"
-        return {"start_date": _fmt(start), "end_date": _fmt(end), "today": _fmt(today), "assumption": assumption}
+        # --- "last N months" ---
+        n_months_match = re.search(r"(?:last|past)\s+(\d+)\s+months?", t)
+        if n_months_match:
+            n = int(n_months_match.group(1))
+            # Go back n months from first of this month
+            this_month_first = _first_of_month(today)
+            month = this_month_first.month - n
+            year = this_month_first.year + (month - 1) // 12
+            month = ((month - 1) % 12) + 1
+            start = date(year, month, 1)
+            end = today
+            assumption = f"Interpreted '{text}' as last {n} months: {_fmt(start)} to {_fmt(end)}"
+            return start, end, assumption
 
-    # --- "last month" / "previous month" ---
-    if any(p in t for p in ("last month", "previous month")):
-        first_this = _first_of_month(today)
-        end = first_this - timedelta(days=1)
-        start = _first_of_month(end)
-        assumption = f"Interpreted '{text}' as: {_fmt(start)} to {_fmt(end)}"
-        return {"start_date": _fmt(start), "end_date": _fmt(end), "today": _fmt(today), "assumption": assumption}
+        # --- "last month" / "previous month" ---
+        if any(p in t for p in ("last month", "previous month")):
+            first_this = _first_of_month(today)
+            end = first_this - timedelta(days=1)
+            start = _first_of_month(end)
+            assumption = f"Interpreted '{text}' as last month: {_fmt(start)} to {_fmt(end)}"
+            return start, end, assumption
 
-    # --- "this month" ---
-    if "this month" in t:
-        start = _first_of_month(today)
-        end = today
-        assumption = f"Interpreted '{text}' as: {_fmt(start)} to {_fmt(end)}"
-        return {"start_date": _fmt(start), "end_date": _fmt(end), "today": _fmt(today), "assumption": assumption}
+        # --- "this month" ---
+        if "this month" in t:
+            start = _first_of_month(today)
+            end = today
+            assumption = f"Interpreted '{text}' as this month: {_fmt(start)} to {_fmt(end)}"
+            return start, end, assumption
 
-    # --- "last week" ---
-    if "last week" in t or "previous week" in t:
-        # ISO week: Monday–Sunday
-        days_since_monday = today.weekday()  # 0=Mon
-        last_sunday = today - timedelta(days=days_since_monday + 1)
-        last_monday = last_sunday - timedelta(days=6)
-        start = last_monday
-        end = last_sunday
-        assumption = f"Interpreted '{text}' as last week: {_fmt(start)} to {_fmt(end)}"
-        return {"start_date": _fmt(start), "end_date": _fmt(end), "today": _fmt(today), "assumption": assumption}
+        # --- "last week" ---
+        if "last week" in t or "previous week" in t:
+            # ISO week: Monday–Sunday
+            days_since_monday = today.weekday()  # 0=Mon
+            last_sunday = today - timedelta(days=days_since_monday + 1)
+            last_monday = last_sunday - timedelta(days=6)
+            start = last_monday
+            end = last_sunday
+            assumption = f"Interpreted '{text}' as last week: {_fmt(start)} to {_fmt(end)}"
+            return start, end, assumption
 
-    # --- "this week" ---
-    if "this week" in t:
-        days_since_monday = today.weekday()
-        start = today - timedelta(days=days_since_monday)
-        end = today
-        assumption = f"Interpreted '{text}' as this week: {_fmt(start)} to {_fmt(end)}"
-        return {"start_date": _fmt(start), "end_date": _fmt(end), "today": _fmt(today), "assumption": assumption}
+        # --- "this week" ---
+        if "this week" in t:
+            days_since_monday = today.weekday()
+            start = today - timedelta(days=days_since_monday)
+            end = today
+            assumption = f"Interpreted '{text}' as this week: {_fmt(start)} to {_fmt(end)}"
+            return start, end, assumption
 
-    # --- "last quarter" ---
-    if "last quarter" in t or "previous quarter" in t:
-        current_q = (today.month - 1) // 3 + 1
-        if current_q == 1:
-            q_num = 4
-            year = today.year - 1
-        else:
-            q_num = current_q - 1
-            year = today.year
-        q_start_month = (q_num - 1) * 3 + 1
-        start = date(year, q_start_month, 1)
-        end = _last_of_month(date(year, q_start_month + 2, 1))
-        assumption = f"Interpreted '{text}' as Q{q_num} {year}: {_fmt(start)} to {_fmt(end)}"
-        return {"start_date": _fmt(start), "end_date": _fmt(end), "today": _fmt(today), "assumption": assumption}
+        # --- "last quarter" ---
+        if "last quarter" in t or "previous quarter" in t:
+            current_q = (today.month - 1) // 3 + 1
+            if current_q == 1:
+                q_num = 4
+                year = today.year - 1
+            else:
+                q_num = current_q - 1
+                year = today.year
+            q_start_month = (q_num - 1) * 3 + 1
+            start = date(year, q_start_month, 1)
+            end = _last_of_month(date(year, q_start_month + 2, 1))
+            assumption = f"Interpreted '{text}' as Q{q_num} {year}: {_fmt(start)} to {_fmt(end)}"
+            return start, end, assumption
 
-    # --- "this quarter" ---
-    if "this quarter" in t:
-        current_q = (today.month - 1) // 3 + 1
-        q_start_month = (current_q - 1) * 3 + 1
-        start = date(today.year, q_start_month, 1)
-        end = today
-        assumption = f"Interpreted '{text}' as this quarter (Q{current_q}): {_fmt(start)} to {_fmt(end)}"
-        return {"start_date": _fmt(start), "end_date": _fmt(end), "today": _fmt(today), "assumption": assumption}
+        # --- "this quarter" ---
+        if "this quarter" in t:
+            current_q = (today.month - 1) // 3 + 1
+            q_start_month = (current_q - 1) * 3 + 1
+            start = date(today.year, q_start_month, 1)
+            end = today
+            assumption = f"Interpreted '{text}' as this quarter (Q{current_q}): {_fmt(start)} to {_fmt(end)}"
+            return start, end, assumption
 
-    # --- "last year" ---
-    if "last year" in t or "previous year" in t:
-        start = date(today.year - 1, 1, 1)
-        end = date(today.year - 1, 12, 31)
-        assumption = f"Interpreted '{text}' as {today.year - 1}: {_fmt(start)} to {_fmt(end)}"
-        return {"start_date": _fmt(start), "end_date": _fmt(end), "today": _fmt(today), "assumption": assumption}
+        # --- "last year" ---
+        if "last year" in t or "previous year" in t:
+            start = date(today.year - 1, 1, 1)
+            end = date(today.year - 1, 12, 31)
+            assumption = f"Interpreted '{text}' as {today.year - 1}: {_fmt(start)} to {_fmt(end)}"
+            return start, end, assumption
 
-    # --- "this year" ---
-    if "this year" in t:
-        start = date(today.year, 1, 1)
-        end = today
-        assumption = f"Interpreted '{text}' as this year: {_fmt(start)} to {_fmt(end)}"
-        return {"start_date": _fmt(start), "end_date": _fmt(end), "today": _fmt(today), "assumption": assumption}
+        # --- "this year" ---
+        if "this year" in t:
+            start = date(today.year, 1, 1)
+            end = today
+            assumption = f"Interpreted '{text}' as this year: {_fmt(start)} to {_fmt(end)}"
+            return start, end, assumption
 
-    # --- "all" / "all time" ---
-    if t in ("all", "all time", "all data", "full period"):
-        start = date(2000, 1, 1)  # effectively open start
-        end = today
-        assumption = f"Interpreted '{text}' as full available range: {_fmt(start)} to {_fmt(end)}"
-        return {"start_date": _fmt(start), "end_date": _fmt(end), "today": _fmt(today), "assumption": assumption}
+        # --- "all" / "all time" ---
+        if t in ("all", "all time", "all data", "full period"):
+            start = q.get_min_log_date()
+            end = today
+            assumption = f"Interpreted '{text}' as full available range: {_fmt(start)} to {_fmt(end)}"
+            return start, end, assumption
 
-    # --- Fallback: default to last 30 days ---
-    start = today - timedelta(days=29)
-    assumption = (
-        f"Could not parse '{text}'; defaulted to last 30 days: {_fmt(start)} to {_fmt(end)}. "
-        "Please re-state the date range for accuracy."
-    )
-    return {"start_date": _fmt(start), "end_date": _fmt(end), "today": _fmt(today), "assumption": assumption}
+        # --- Fallback: default to last 30 days ---
+        start = today - timedelta(days=29)
+        assumption = (
+            f"Could not parse '{text}'; defaulted to last 30 days: {_fmt(start)} to {_fmt(end)}. "
+            "Please re-state the date range for accuracy."
+        )
+        return start, end, assumption
+
+    raw_start, raw_end, assumption = _parse(t)
+    
+    # Clamp to actual DB bounds
+    min_db = q.get_min_log_date()
+    max_db = today
+    
+    warnings_list = []
+    
+    # Check if totally out of bounds
+    if raw_end < min_db or raw_start > max_db:
+        warnings_list.append(f"Requested range ({_fmt(raw_start)} to {_fmt(raw_end)}) has no data. Clamped to {_fmt(min_db)} to {_fmt(max_db)}.")
+        raw_start = min_db
+        raw_end = max_db
+    else:
+        if raw_start < min_db:
+            warnings_list.append(f"Requested start date {_fmt(raw_start)} predates available data. Clamped to {_fmt(min_db)}.")
+            raw_start = min_db
+        if raw_end > max_db:
+            warnings_list.append(f"Requested end date {_fmt(raw_end)} exceeds available data. Clamped to {_fmt(max_db)}.")
+            raw_end = max_db
+            
+    if warnings_list:
+        assumption += " | WARNING: " + " ".join(warnings_list)
+        
+    return {
+        "start_date": _fmt(raw_start), 
+        "end_date": _fmt(raw_end), 
+        "today": _fmt(today), 
+        "assumption": assumption
+    }
 
 
 # ---------------------------------------------------------------------------
