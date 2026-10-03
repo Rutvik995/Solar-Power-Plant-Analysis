@@ -16,7 +16,7 @@ import pandas as pd
 import yaml
 
 from solar_agent.config.settings import STATUS_CODES_PATH
-from solar_agent.graph.executor import DataStore
+from solar_agent.graph.data_store import DataStore
 from solar_agent.tools import metrics as m
 from solar_agent.config.settings import settings
 
@@ -110,11 +110,14 @@ def detect_status_faults(data_ref: str) -> dict[str, Any]:
     }
 
 
-def detect_peer_underperformance(data_ref: str, min_consecutive_days: int = 1) -> dict[str, Any]:
+def detect_peer_underperformance(data_ref: str, min_consecutive_days: int | None = None) -> dict[str, Any]:
     """
     Identifies inverters significantly underperforming their block peers.
     Uses MAD-based z-score (from metrics.py). Flags if score < -threshold for N days.
     """
+    if min_consecutive_days is None:
+        min_consecutive_days = settings.peer_underperformance_min_days
+
     df = DataStore.get_or_load(data_ref)
     if df is None or df.empty:
         return {"summary": "No data for peer underperformance check.", "warnings": ["Empty/missing data"]}
