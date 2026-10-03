@@ -95,21 +95,21 @@ def analyze_weather_correlation(data_ref: str) -> dict[str, Any]:
             warnings.append("Missing columns to compute performance ratio.")
     
     # 1. Temperature vs PR (Temperature Coefficient)
-    if "module_temperature_c" in df.columns:
+    if "max_module_temp_c" in df.columns:
         # Drop NaNs for regression
-        temp_df = df.dropna(subset=["module_temperature_c", "performance_ratio"])
+        temp_df = df.dropna(subset=["max_module_temp_c", "performance_ratio"])
         if len(temp_df) > 5:
             if len(temp_df) < 14:
                 warnings.append(f"Small sample size for Temperature vs PR regression: {len(temp_df)} valid days.")
             slope, intercept, r_value, p_value, std_err = linregress(
-                temp_df["module_temperature_c"], temp_df["performance_ratio"]
+                temp_df["max_module_temp_c"], temp_df["performance_ratio"]
             )
             metrics["temp_pr_slope"] = slope
             metrics["temp_pr_r2"] = r_value ** 2
         else:
             warnings.append("Not enough data points for Temperature vs PR regression.")
     else:
-        warnings.append("Missing module_temperature_c column.")
+        warnings.append("Missing max_module_temp_c column.")
 
     # 2. Irradiance vs Yield
     if "total_solar_radiation_kwh_m2" in df.columns and "total_daily_yield_kwh" in df.columns:

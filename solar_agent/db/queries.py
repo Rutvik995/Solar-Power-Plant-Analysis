@@ -119,7 +119,7 @@ SELECT
     dit.total_daily_yield_kwh,
     dit.avg_dc_voltage_v,
     dit.avg_dc_current_a,
-    dit.inverter_status_code,
+    dit.inverter_status_code AS status_code,
     dwt.total_solar_radiation_kwh_m2,
     dwt.peak_poa_irradiance_w_m2,
     dwt.avg_ambient_temp_c,
@@ -198,12 +198,12 @@ def fetch_inverter_daily(
     # Enforce correct dtypes
     if not df.empty:
         df["log_date"] = pd.to_datetime(df["log_date"]).dt.date
-        for col in [
-            "inverter_id", "plant_id", "block_id",
-            "inverter_status_code",
-        ]:
+        for col in ["plant_id", "status_code"]:
             if col in df.columns:
                 df[col] = df[col].astype("Int64")  # nullable integer
+        for col in ["inverter_id", "block_id"]:
+            if col in df.columns:
+                df[col] = df[col].astype("string")
         numeric_cols = [
             "rated_dc_kw", "rated_ac_kw",
             "peak_dc_power_kw", "peak_ac_power_kw", "total_daily_yield_kwh",
