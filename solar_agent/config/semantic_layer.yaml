@@ -1,0 +1,381 @@
+# Semantic Layer for the Solar Power Plant Analysis System
+#
+# This file is the single source of truth for:
+#   - Table/column descriptions exposed to LLM agents
+#   - Business rules and formula definitions
+#   - Relationships between entities
+#   - Units of measurement
+#
+# Agents MUST NOT infer table structure from SQL errors alone;
+# they MUST use this file (via get_schema_info()) first.
+
+# ---------------------------------------------------------------------------
+# Database Tables
+# ---------------------------------------------------------------------------
+tables:
+
+  plants:
+    description: >
+      Top-level entity. Each row represents one solar power plant.
+      A plant contains one or more blocks.
+    primary_key: plant_id
+    columns:
+      plant_id:
+        type: integer
+        description: Unique plant identifier.
+      plant_name:
+        type: text
+        description: Human-readable plant name (e.g. "Rajasthan Solar Park 1").
+      area_acres:
+        type: numeric
+        unit: acres
+        description: Total land area of the plant in acres.
+      capacity_mwp:
+        type: numeric
+        unit: MWp
+        description: >
+          Total installed DC capacity of the plant in Megawatt-peak.
+          Sum of all inverter rated_dc_kw / 1000 should equal this value.
+
+  blocks:
+    description: >
+      A logical sub-division of a plant (e.g. "Block A", "Block B").
+      Each block groups several inverters.
+    primary_key: block_id
+    foreign_keys:
+      plant_id: plants.plant_id
+    columns:
+      block_id:
+        type: integer
+        description: Unique block identifier.
+      plant_id:
+        type: integer
+        description: FK → plants.plant_id.
+      block_name:
+        type: text
+        description: Human-readable block name (e.g. "Block A").
+
+  inverters:
+    description: >
+      Physical inverters. Each inverter belongs to exactly one block and one plant.
+      Ratings represent nameplate / design-point values.
+    primary_key: inverter_id
+    foreign_keys:
+      block_id: blocks.block_id
+      plant_id: plants.plant_id
+    columns:
+      inverter_id:
+        type: integer
+        description: Unique inverter identifier.
+      block_id:
+        type: integer
+        description: FK → blocks.block_id.
+      plant_id:
+        type: integer
+        description: FK → plants.plant_id.
+      rated_dc_kw:
+        type: numeric
+        unit: kW (DC)
+        description: >
+          Nameplate DC input capacity of the inverter in kW.
+          Used as the denominator in PR, specific yield, and capacity factor.
+      rated_ac_kw:
+        type: numeric
+        unit: kW (AC)
+        description: >
+          Nameplate AC output capacity of the inverter in kW.
+          Used for clipping detection and capacity factor (AC basis).
+
+  daily_weather_telemetry:
+    description: >
+      One row per (date, plant). Weather is measured at the plant level and
+      applies equally to all inverters in that plant on that date.
+      There is NO block-level or inverter-level weather data.
+    primary_key: [log_date, plant_id]
+    foreign_keys:
+      plant_id: plants.plant_id
+    columns:
+      log_date:
+        type: date
+        description: Calendar date of the measurement (local plant time).
+      plant_id:
+        type: integer
+        description: FK → plants.plant_id.
+      peak_poa_irradiance_w_m2:
+        type: numeric
+        unit: W/m²
+        description: >
+          Maximum plane-of-array (POA) irradiance recorded during the day.
+          Reference irradiance for STC is 1000 W/m².
+      total_solar_radiation_kwh_m2:
+        type: numeric
+        unit: kWh/m²
+        description: >
+          Total daily insolation (POA) integrated over the day.
+          Also called "peak sun hours" (PSH) when expressed in kWh/m².
+          Used as H in PR = yield / (rated_dc_kw × H).
+          IMPORTANT: Only use days where this value > 0.5 kWh/m² for PR calculations.
+      avg_ambient_temp_c:
+        type: numeric
+        unit: °C
+        description: Average ambient (air) temperature during daylight hours.
+      max_module_temp_c:
+        type: numeric
+        unit: °C
+        description: >
+          Maximum module (panel surface) temperature during the day.
+          High module temperature causes power derating (temperature coefficient ~ -0.4%/°C above 25°C).
+      soiling_ratio:
+        type: numeric
+        unit: dimensionless (0–1)
+        description: >
+          Ratio of actual panel output relative to a perfectly clean panel.
+          Convention: 1.0 = perfectly clean; 0.95 = 5% power loss due to soiling (dust/dirt).
+          Values are typically in the range 0.85–1.00 for operational plants.
+          Soiling loss % = (1 - soiling_ratio) × 100
+          Energy lost to soiling ≈ yield × (1/soiling_ratio - 1)
+
+  daily_inverter_telemetry:
+    description: >
+      One row per (date, inverter). Primary operational data source.
+      All power values are MEASURED, not rated.
+      IMPORTANT: peak_* values are daily maxima; total_daily_yield_kwh is cumulative AC energy.
+    primary_key: [log_date, inverter_id]
+    foreign_keys:
+      inverter_id: inverters.inverter_id
+      plant_id: plants.plant_id
+    columns:
+      log_date:
+        type: date
+        description: Calendar date of the measurement.
+      inverter_id:
+        type: integer
+        description: FK → inverters.inverter_id.
+      plant_id:
+        type: integer
+        description: FK → plants.plant_id. Denormalised for query convenience.
+      peak_dc_power_kw:
+        type: numeric
+        unit: kW (DC)
+        description: >
+          Maximum DC input power recorded during the day (daily maximum, not average).
+          Used for inverter efficiency calculation (guard: must be > 1.0 kW).
+      peak_ac_power_kw:
+        type: numeric
+        unit: kW (AC)
+        description: >
+          Maximum AC output power recorded during the day.
+          Used for clipping detection: clipping if peak_ac_power_kw ≥ 0.98 × rated_ac_kw.
+      total_daily_yield_kwh:
+        type: numeric
+        unit: kWh (AC)
+        description: >
+          Total AC energy produced by the inverter during the day.
+          This is the primary yield metric. It is AC energy (after inverter losses).
+      avg_dc_voltage_v:
+        type: numeric
+        unit: V
+        description: >
+          Average DC bus voltage during daylight hours.
+          Used for consistency check: avg_dc_voltage_v × avg_dc_current_a / 1000
+          should approximate peak_dc_power_kw (within ~20% tolerance).
+      avg_dc_current_a:
+        type: numeric
+        unit: A
+        description: Average DC input current during daylight hours.
+      inverter_status_code:
+        type: integer
+        description: >
+          Operational status code. See config/status_codes.yaml for the full mapping.
+          Summary: 0=Normal, 1=Standby, 2=Warning, 3=Fault, 4=Offline.
+          Codes ≥ 3 are fault conditions.
+          Code 1 (Standby) is expected at dawn/dusk and on low-irradiance days;
+          do NOT flag Standby days as zero-generation faults.
+
+# ---------------------------------------------------------------------------
+# Entity Hierarchy
+# ---------------------------------------------------------------------------
+hierarchy:
+  description: plant → block → inverter (3 levels)
+  rules:
+    - Every inverter belongs to exactly one block and one plant.
+    - Every block belongs to exactly one plant.
+    - Weather data is at the PLANT level; join via plant_id to get weather for any inverter.
+    - "Block-level" aggregates are always computed by summing/aggregating inverter-level data,
+      never by querying a block telemetry table (which does not exist).
+
+# ---------------------------------------------------------------------------
+# Standard Join Patterns
+# ---------------------------------------------------------------------------
+join_patterns:
+
+  inverter_with_weather:
+    description: >
+      The standard join for any analysis requiring yield + weather.
+      Always use this pattern for PR, soiling, and environmental analysis.
+    sql_template: |
+      SELECT
+          dit.log_date,
+          dit.inverter_id,
+          dit.plant_id,
+          inv.block_id,
+          inv.rated_dc_kw,
+          inv.rated_ac_kw,
+          b.block_name,
+          p.plant_name,
+          dit.peak_dc_power_kw,
+          dit.peak_ac_power_kw,
+          dit.total_daily_yield_kwh,
+          dit.avg_dc_voltage_v,
+          dit.avg_dc_current_a,
+          dit.inverter_status_code,
+          dwt.total_solar_radiation_kwh_m2,
+          dwt.peak_poa_irradiance_w_m2,
+          dwt.avg_ambient_temp_c,
+          dwt.max_module_temp_c,
+          dwt.soiling_ratio
+      FROM daily_inverter_telemetry dit
+      JOIN inverters inv ON dit.inverter_id = inv.inverter_id
+      JOIN blocks b ON inv.block_id = b.block_id
+      JOIN plants p ON dit.plant_id = p.plant_id
+      JOIN daily_weather_telemetry dwt
+          ON dit.log_date = dwt.log_date AND dit.plant_id = dwt.plant_id
+      WHERE dit.log_date BETWEEN :start_date AND :end_date
+
+# ---------------------------------------------------------------------------
+# Key Performance Indicator Formulas
+# ---------------------------------------------------------------------------
+kpi_formulas:
+
+  performance_ratio:
+    name: Performance Ratio (PR)
+    unit: dimensionless (0–1, sometimes expressed as %)
+    formula: total_daily_yield_kwh / (rated_dc_kw × total_solar_radiation_kwh_m2)
+    guard: total_solar_radiation_kwh_m2 > 0.5
+    description: >
+      PR compares actual yield against theoretical maximum given the irradiance.
+      It cancels the effect of irradiance variation, making it the best
+      day-to-day and inverter-to-inverter comparison metric.
+      Typical healthy range: 0.75–0.85.
+    aggregation_note: >
+      For block/plant-level PR, sum numerators and denominators separately:
+      PR_block = Σ(yield_i) / Σ(rated_dc_kw_i × H)
+      Never average individual PR values directly.
+
+  specific_yield:
+    name: Specific Yield
+    unit: kWh/kWp
+    formula: total_daily_yield_kwh / rated_dc_kw
+    description: >
+      Energy produced per kWp of installed capacity.
+      Useful for comparing plants of different sizes.
+
+  capacity_factor:
+    name: Capacity Factor (AC basis)
+    unit: dimensionless (0–1)
+    formula: total_daily_yield_kwh / (rated_ac_kw × 24)
+    description: >
+      Fraction of maximum possible AC energy produced in a 24-hour period.
+      Typical range for solar: 0.15–0.25.
+
+  inverter_efficiency:
+    name: Inverter Peak Efficiency
+    unit: dimensionless (0–1)
+    formula: peak_ac_power_kw / peak_dc_power_kw
+    guard: peak_dc_power_kw > 1.0
+    description: >
+      Ratio of maximum AC to maximum DC power during the day.
+      Typical range: 0.96–0.99. Values < 0.90 may indicate a fault.
+
+  dc_ac_loading_ratio:
+    name: DC/AC Loading Ratio (Design ratio)
+    unit: dimensionless
+    formula: rated_dc_kw / rated_ac_kw
+    description: >
+      Ratio of DC nameplate to AC nameplate. Values > 1.0 mean the DC array
+      is oversized relative to the inverter AC output (normal for solar).
+      Typical: 1.10–1.35.
+
+  clipping_indicator:
+    name: Clipping Indicator
+    unit: boolean
+    formula: peak_ac_power_kw >= 0.98 × rated_ac_kw
+    description: >
+      True if the inverter is likely clipping (AC output capped by inverter limit).
+      Persistent clipping suggests the DC array is oversized or there is a
+      significant DC performance advantage.
+
+  dc_power_consistency:
+    name: DC Power Consistency Check
+    unit: kW
+    formula: avg_dc_voltage_v × avg_dc_current_a / 1000
+    description: >
+      Reconstructed DC power from voltage and current averages.
+      Should be within ~20% of peak_dc_power_kw (since peak ≠ average).
+      Large discrepancies may indicate sensor error.
+
+  soiling_loss_percent:
+    name: Soiling Loss Percentage
+    unit: percent
+    formula: (1 - soiling_ratio) × 100
+    description: >
+      Percentage of potential output lost to panel soiling (dust, dirt, bird droppings).
+      Derived from daily_weather_telemetry.soiling_ratio.
+
+  soiling_energy_loss:
+    name: Energy Lost to Soiling
+    unit: kWh
+    formula: total_daily_yield_kwh × (1 / soiling_ratio - 1)
+    guard: soiling_ratio > 0
+    description: >
+      Estimated energy that would have been produced without soiling.
+      Sum over many days to get total soiling impact in a period.
+
+  peer_deviation_score:
+    name: Peer Deviation Score (Robust Z-score)
+    unit: MAD units
+    formula: (PR_inverter - median(PR_block_same_day)) / MAD(PR_block_same_day)
+    description: >
+      Measures how far an inverter's PR deviates from its block peers on the same day,
+      normalised by the Median Absolute Deviation (MAD).
+      This metric cancels weather effects (since all peers share the same irradiance).
+      Scores < -2.0 flag likely underperformance. Use this as the primary fault signal.
+
+# ---------------------------------------------------------------------------
+# Business Rules (enforced in tool code)
+# ---------------------------------------------------------------------------
+business_rules:
+  - id: BR-01
+    rule: >
+      Exclude any day where total_solar_radiation_kwh_m2 <= 0.5 kWh/m²
+      from PR calculations, specific yield comparisons, and zero-generation checks.
+
+  - id: BR-02
+    rule: >
+      Do not flag inverter_status_code = 1 (Standby) as a fault or zero-generation event.
+      Standby is expected on low-irradiance days.
+
+  - id: BR-03
+    rule: >
+      All numeric outputs must originate from SQL or Python tool results.
+      The LLM must NEVER fabricate numbers or perform mental arithmetic on data.
+
+  - id: BR-04
+    rule: >
+      Block-level and plant-level PR must be computed by summing yields and
+      summing (capacity × H), then dividing. Never average inverter-level PRs.
+
+  - id: BR-05
+    rule: >
+      "Today" is defined as MAX(log_date) across both telemetry tables.
+      Never use the system clock for date resolution.
+
+  - id: BR-06
+    rule: >
+      The SQL executor only permits SELECT statements. Any DML (INSERT, UPDATE,
+      DELETE, DROP, etc.) must be rejected with a SecurityError.
+
+  - id: BR-07
+    rule: >
+      soiling_ratio = 1.0 means perfectly clean panels.
+      Values below 1.0 represent fractional power loss due to soiling.

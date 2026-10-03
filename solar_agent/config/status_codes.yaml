@@ -1,0 +1,60 @@
+# Inverter Status Code Definitions
+# Used by: tools/fault_tools.py, agents/fault_agent.py
+#
+# Convention: store only the integer code in daily_inverter_telemetry.inverter_status_code
+# A day's "dominant" status is the worst code seen that day if multiple readings exist,
+# or the single stored code if one reading per day.
+#
+# Fault detection treats any code >= 3 as a fault condition.
+# Codes 1 (Standby) are excluded from zero-generation checks
+# (the inverter is idle intentionally — e.g. night / low irradiance).
+
+status_codes:
+  0:
+    label: Normal
+    description: >
+      Inverter is operating normally and producing power.
+    is_fault: false
+    exclude_from_yield_check: false
+
+  1:
+    label: Standby
+    description: >
+      Inverter is in standby mode — typically due to low irradiance
+      (dawn, dusk, overcast). No generation expected.
+    is_fault: false
+    exclude_from_yield_check: true   # do NOT flag as zero-generation
+
+  2:
+    label: Warning
+    description: >
+      Inverter has raised a non-critical warning (e.g. high temperature,
+      communication delay, minor grid deviation). Still producing power
+      but should be monitored.
+    is_fault: false
+    exclude_from_yield_check: false
+
+  3:
+    label: Fault
+    description: >
+      Inverter has tripped or encountered a critical fault (e.g. isolation
+      failure, over-voltage, DC overcurrent). Generation has stopped or is
+      severely reduced. Immediate inspection required.
+    is_fault: true
+    exclude_from_yield_check: false   # flag zero-generation even on fault days
+
+  4:
+    label: Offline
+    description: >
+      Inverter is not communicating with the SCADA/monitoring system.
+      May indicate power loss, network fault, or hardware failure.
+      Actual power state is unknown.
+    is_fault: true
+    exclude_from_yield_check: false
+
+# Fault severity thresholds (used by detect_status_faults)
+fault_thresholds:
+  # Minimum consecutive fault days to raise a "streak" alert
+  min_fault_streak_days: 2
+  # Minimum fraction of days in the period that are fault/offline to flag an inverter
+  min_fault_day_fraction: 0.10   # 10% of the analysis window

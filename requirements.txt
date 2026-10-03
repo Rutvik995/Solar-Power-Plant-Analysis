@@ -1,0 +1,38 @@
+# requirements.txt — Solar Power Plant Analysis multi-agent system
+# Install with: pip install -r requirements.txt
+
+# Core framework
+langgraph>=0.2,<0.4
+langchain>=0.3,<0.4
+langchain-core>=0.3,<0.4
+langchain-google-genai>=2.0,<3.0
+
+# Database
+sqlalchemy>=2.0,<3.0
+psycopg[binary]>=3.1,<4.0
+langgraph-checkpoint-postgres>=2.0,<3.0
+
+# Data processing
+pandas>=2.0,<3.0
+numpy>=1.26,<2.1
+
+# Configuration
+pydantic>=2.0,<3.0
+pydantic-settings>=2.0,<3.0
+
+# SQL parsing / security
+sqlglot>=25.0,<26.0
+
+# Fuzzy matching (entity resolution)
+thefuzz>=0.22,<1.0
+python-levenshtein>=0.25,<1.0
+
+# YAML
+pyyaml>=6.0,<7.0
+
+# Testing
+pytest>=8.0,<9.0
+pytest-asyncio>=0.24,<1.0
+
+# Observability (optional)
+langsmith>=0.2,<1.0
