@@ -78,16 +78,16 @@ def test_analyze_weather_correlation_missing_cols():
     ref = DataStore.store(df)
     res = analyze_weather_correlation(ref)
     assert "warnings" in res
-    assert "Missing module_temperature_c column." in res["warnings"]
+    assert "Missing max_module_temp_c column." in res["warnings"]
 
 def test_analyze_weather_correlation_small_sample():
     # Only 6 rows (trigger the < 14 warning, but > 5 so it computes)
     df = pd.DataFrame({
-        "module_temperature_c": [20, 30, 40, 50, 60, 70],
+        "max_module_temp_c": [20, 30, 40, 50, 60, 70],
         "total_solar_radiation_kwh_m2": [1, 2, 3, 4, 5, 6],
     })
     df["total_daily_yield_kwh"] = df["total_solar_radiation_kwh_m2"] * 10
-    df["performance_ratio"] = 1.0 - (0.004 * df["module_temperature_c"])
+    df["performance_ratio"] = 1.0 - (0.004 * df["max_module_temp_c"])
     
     ref = DataStore.store(df)
     res = analyze_weather_correlation(ref)
@@ -98,11 +98,11 @@ def test_analyze_weather_correlation_small_sample():
 def test_analyze_weather_correlation_perfect_fit():
     # 15 rows to avoid the sample size warning
     df = pd.DataFrame({
-        "module_temperature_c": list(range(20, 35)),
+        "max_module_temp_c": list(range(20, 35)),
         "total_solar_radiation_kwh_m2": list(range(1, 16)),
     })
     df["total_daily_yield_kwh"] = df["total_solar_radiation_kwh_m2"] * 10
-    df["performance_ratio"] = 1.0 - (0.004 * df["module_temperature_c"])
+    df["performance_ratio"] = 1.0 - (0.004 * df["max_module_temp_c"])
     
     ref = DataStore.store(df)
     res = analyze_weather_correlation(ref)
@@ -113,7 +113,7 @@ def test_analyze_weather_correlation_perfect_fit():
 
 def test_analyze_weather_correlation_all_nulls():
     df = pd.DataFrame({
-        "module_temperature_c": [np.nan]*15,
+        "max_module_temp_c": [np.nan]*15,
         "total_solar_radiation_kwh_m2": [np.nan]*15,
         "total_daily_yield_kwh": [10]*15,
         "performance_ratio": [0.8]*15,
