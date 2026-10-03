@@ -102,8 +102,16 @@ class Settings(BaseSettings):
         ),
     )
     peer_underperformance_z_threshold: float = Field(
-        default=2.0,
+        default=3.0,
         description="Robust z-score (MAD-based) threshold to flag peer underperformance.",
+    )
+    peer_underperformance_min_days: int = Field(
+        default=3,
+        description="Minimum consecutive days of underperformance to flag as a fault.",
+    )
+    soiling_cleaning_jump_threshold: float = Field(
+        default=0.02,
+        description="Threshold for a day-over-day jump in soiling_ratio to be considered a cleaning event.",
     )
 
     # --- Re-planning ---

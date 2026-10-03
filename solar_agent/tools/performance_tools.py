@@ -13,7 +13,7 @@ from typing import Any, Literal
 
 import pandas as pd
 
-from solar_agent.graph.executor import DataStore
+from solar_agent.graph.data_store import DataStore
 from solar_agent.tools import metrics as m
 
 logger = logging.getLogger(__name__)
@@ -119,7 +119,7 @@ def compare_periods(
     df_curr = DataStore.get_or_load(ref_current)
     df_base = DataStore.get_or_load(ref_baseline)
 
-    if df_curr is None or df_base is None:
+    if df_curr is None or df_base is None or df_curr.empty or df_base.empty:
         return {"summary": "Missing data for comparison.", "warnings": ["Data missing"]}
         
     df_merged = pd.merge(

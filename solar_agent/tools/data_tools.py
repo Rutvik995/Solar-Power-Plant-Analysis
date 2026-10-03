@@ -591,7 +591,7 @@ def fetch_inverter_daily_tool(
         "sample":   first 3 rows as list of dicts (for LLM inspection)
         "date_range": {"min": ..., "max": ...}
     """
-    from solar_agent.graph.executor import DataStore  # avoid circular at module load
+    from solar_agent.graph.data_store import DataStore  # avoid circular at module load
 
     start = date.fromisoformat(start_date)
     end = date.fromisoformat(end_date)
@@ -633,7 +633,7 @@ def fetch_weather_daily_tool(
 
     Returns a dict with data_ref, shape, columns, sample, date_range.
     """
-    from solar_agent.graph.executor import DataStore
+    from solar_agent.graph.data_store import DataStore
 
     start = date.fromisoformat(start_date)
     end = date.fromisoformat(end_date)

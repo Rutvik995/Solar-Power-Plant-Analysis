@@ -14,8 +14,9 @@ import numpy as np
 import pandas as pd
 from scipy.stats import linregress
 
-from solar_agent.graph.executor import DataStore
+from solar_agent.graph.data_store import DataStore
 from solar_agent.tools import metrics as m
+from solar_agent.config.settings import settings
 
 logger = logging.getLogger(__name__)
 
@@ -43,9 +44,8 @@ def estimate_soiling_loss(data_ref: str) -> dict[str, Any]:
     group_cols = [c for c in ["plant_id", "block_id", "inverter_id"] if c in df.columns]
     df = df.sort_values(by=group_cols + ["log_date"])
     
-    # Detect cleaning events: day-over-day increase in soiling ratio > 2%
-    # (e.g. going from 0.95 to 0.98)
-    JUMP_THRESHOLD = 0.02
+    # Detect cleaning events: day-over-day increase in soiling ratio > threshold
+    JUMP_THRESHOLD = settings.soiling_cleaning_jump_threshold
     
     if group_cols:
         df["prev_soiling_ratio"] = df.groupby(group_cols)["soiling_ratio"].shift(1)
@@ -84,18 +84,23 @@ def analyze_weather_correlation(data_ref: str) -> dict[str, Any]:
     if df is None or df.empty:
         return {"summary": "No data for weather correlation.", "warnings": ["Empty/missing data"]}
 
-    # Ensure PR is computed
-    if "performance_ratio" not in df.columns:
-        df = m.compute_performance_ratio(df)
-
     warnings = []
     metrics = {}
+    
+    # Ensure PR is computed
+    if "performance_ratio" not in df.columns:
+        if "rated_dc_kw" in df.columns and "total_solar_radiation_kwh_m2" in df.columns:
+            df = m.compute_performance_ratio(df)
+        else:
+            warnings.append("Missing columns to compute performance ratio.")
     
     # 1. Temperature vs PR (Temperature Coefficient)
     if "module_temperature_c" in df.columns:
         # Drop NaNs for regression
         temp_df = df.dropna(subset=["module_temperature_c", "performance_ratio"])
         if len(temp_df) > 5:
+            if len(temp_df) < 14:
+                warnings.append(f"Small sample size for Temperature vs PR regression: {len(temp_df)} valid days.")
             slope, intercept, r_value, p_value, std_err = linregress(
                 temp_df["module_temperature_c"], temp_df["performance_ratio"]
             )
@@ -110,6 +115,8 @@ def analyze_weather_correlation(data_ref: str) -> dict[str, Any]:
     if "total_solar_radiation_kwh_m2" in df.columns and "total_daily_yield_kwh" in df.columns:
         irr_df = df.dropna(subset=["total_solar_radiation_kwh_m2", "total_daily_yield_kwh"])
         if len(irr_df) > 5:
+            if len(irr_df) < 14:
+                warnings.append(f"Small sample size for Irradiance vs Yield regression: {len(irr_df)} valid days.")
             slope, intercept, r_value, p_value, std_err = linregress(
                 irr_df["total_solar_radiation_kwh_m2"], irr_df["total_daily_yield_kwh"]
             )
