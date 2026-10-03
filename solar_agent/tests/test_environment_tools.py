@@ -85,6 +85,7 @@ def test_analyze_weather_correlation_small_sample():
     df = pd.DataFrame({
         "max_module_temp_c": [20, 30, 40, 50, 60, 70],
         "total_solar_radiation_kwh_m2": [1, 2, 3, 4, 5, 6],
+        "rated_dc_kw": [10, 10, 10, 10, 10, 10],
     })
     df["total_daily_yield_kwh"] = df["total_solar_radiation_kwh_m2"] * 10
     df["performance_ratio"] = 1.0 - (0.004 * df["max_module_temp_c"])
@@ -100,6 +101,7 @@ def test_analyze_weather_correlation_perfect_fit():
     df = pd.DataFrame({
         "max_module_temp_c": list(range(20, 35)),
         "total_solar_radiation_kwh_m2": list(range(1, 16)),
+        "rated_dc_kw": [10] * 15,
     })
     df["total_daily_yield_kwh"] = df["total_solar_radiation_kwh_m2"] * 10
     df["performance_ratio"] = 1.0 - (0.004 * df["max_module_temp_c"])
@@ -115,6 +117,7 @@ def test_analyze_weather_correlation_all_nulls():
     df = pd.DataFrame({
         "max_module_temp_c": [np.nan]*15,
         "total_solar_radiation_kwh_m2": [np.nan]*15,
+        "rated_dc_kw": [10]*15,
         "total_daily_yield_kwh": [10]*15,
         "performance_ratio": [0.8]*15,
     })
