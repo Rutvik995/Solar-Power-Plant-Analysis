@@ -21,7 +21,7 @@ else:
     
     # 1. Fetch data
     result = fetch_inverter_daily_tool.invoke({
-        "plant_id": plant_id,
+        "plant_ids": [plant_id],
         "start_date": "2026-09-01",
         "end_date": "2026-09-30"
     })

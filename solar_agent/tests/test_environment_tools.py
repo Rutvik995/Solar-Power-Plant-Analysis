@@ -65,6 +65,32 @@ def test_estimate_soiling_loss_all_nulls():
     res = estimate_soiling_loss(ref)
     assert res["metrics"]["cleaning_events_detected"] == 0
 
+def test_estimate_soiling_loss_hand_computed():
+    df = pd.DataFrame({
+        "log_date": ["2025-01-01", "2025-01-02", "2025-01-03", "2025-01-01", "2025-01-02", "2025-01-03"],
+        "plant_id": [1, 1, 1, 1, 1, 1],
+        "inverter_id": ["INV1", "INV1", "INV1", "INV2", "INV2", "INV2"],
+        "soiling_ratio": [0.95] * 6,
+        "total_daily_yield_kwh": [1000] * 6
+    })
+    ref = DataStore.store(df)
+    res = estimate_soiling_loss(ref)
+    # 6000 * (1/0.95 - 1) = 315.79
+    assert abs(res["metrics"]["total_loss_kwh"] - 315.79) < 0.1
+    assert not any(">15% of yield" in w for w in res.get("warnings", []))
+
+def test_estimate_soiling_loss_high_warning():
+    df = pd.DataFrame({
+        "log_date": ["2025-01-01"],
+        "plant_id": [1],
+        "inverter_id": ["INV1"],
+        "soiling_ratio": [0.80],
+        "total_daily_yield_kwh": [1000]
+    })
+    ref = DataStore.store(df)
+    res = estimate_soiling_loss(ref)
+    assert any(">15% of yield" in w for w in res["warnings"])
+
 
 # --- analyze_weather_correlation ---
 
