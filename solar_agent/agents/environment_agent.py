@@ -11,8 +11,9 @@ Allowed tools: estimate_soiling_loss_tool, analyze_weather_correlation_tool
 from __future__ import annotations
 
 from langchain_core.tools import tool
+from pydantic import BaseModel, ConfigDict
 
-from solar_agent.agents.base_agent import BaseSpecialistAgent
+from solar_agent.agents.base_agent import SingleCallAgent
 from solar_agent.prompts.agent_prompts import ENVIRONMENT_AGENT_PROMPT
 from solar_agent.tools.environment_tools import (
     analyze_weather_correlation,
@@ -20,7 +21,11 @@ from solar_agent.tools.environment_tools import (
 )
 
 
-@tool
+class EstimateSoilingLossSchema(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    data_ref: str
+
+@tool(args_schema=EstimateSoilingLossSchema)
 def estimate_soiling_loss_tool(data_ref: str) -> dict:
     """
     Estimate energy lost to soiling and detect cleaning events.
@@ -34,7 +39,11 @@ def estimate_soiling_loss_tool(data_ref: str) -> dict:
     return estimate_soiling_loss(data_ref)
 
 
-@tool
+class AnalyzeWeatherCorrelationSchema(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    data_ref: str
+
+@tool(args_schema=AnalyzeWeatherCorrelationSchema)
 def analyze_weather_correlation_tool(data_ref: str) -> dict:
     """
     Compute statistical correlations:
@@ -49,9 +58,9 @@ def analyze_weather_correlation_tool(data_ref: str) -> dict:
     return analyze_weather_correlation(data_ref)
 
 
-class EnvironmentAgent(BaseSpecialistAgent):
+class EnvironmentAgent(SingleCallAgent):
     name = "environment"
-    system_prompt = ENVIRONMENT_AGENT_PROMPT
+    # system_prompt is unused in SingleCallAgent
     tools = [
         estimate_soiling_loss_tool,
         analyze_weather_correlation_tool,

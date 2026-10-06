@@ -147,7 +147,7 @@ class Orchestrator:
     def __init__(self, llm):
         self._llm = llm
 
-    def plan(self, state: AgentState) -> dict:
+    def plan(self, state: AgentState, run_id: str = "__default__") -> dict:
         """
         Produce (or revise) a Plan and return a state patch.
         Called as a LangGraph node: receives full AgentState, returns partial update.
@@ -186,7 +186,7 @@ class Orchestrator:
         messages = [SystemMessage(content=_ORCHESTRATOR_SYSTEM_PROMPT), human_msg]
 
         try:
-            response = self._llm.invoke(messages)
+            response = self._llm.invoke(messages, run_id=run_id)
             raw = response.content.strip()
 
             # Strip markdown fences if the LLM wraps the JSON

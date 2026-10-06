@@ -55,6 +55,36 @@ def test_estimate_soiling_loss_noise_vs_cleaning():
     assert res["metrics"]["cleaning_events_detected"] == 1  # only the +0.05 jump
 
 
+def test_estimate_soiling_loss_316_kwh_case():
+    """The hand-computed 316 kWh case: verify the loss formula exactly matches."""
+    # If yield is 1000 and soiling_ratio is ~0.759878, expected yield is 1316
+    # So loss is exactly 316 kWh.
+    df = pd.DataFrame({
+        "log_date": ["2023-01-01"],
+        "soiling_ratio": [0.7598784],
+        "total_daily_yield_kwh": [1000.0]
+    })
+    ref = DataStore.store(df)
+    res = estimate_soiling_loss(ref)
+    assert abs(res["metrics"]["total_loss_kwh"] - 316.0) < 0.1
+    # 316 > 0.15 * 1000 (150). So it will have a warning!
+    assert any("High soiling loss detected" in w for w in res["warnings"])
+
+
+def test_estimate_soiling_loss_warning_fires():
+    """Verify the >15% warning fires correctly when loss exceeds 15% of yield."""
+    df = pd.DataFrame({
+        "log_date": ["2023-01-01"],
+        "soiling_ratio": [0.8],  # yield 100, expected 125, loss 25. 25/100 = 25% > 15%
+        "total_daily_yield_kwh": [100.0]
+    })
+    ref = DataStore.store(df)
+    res = estimate_soiling_loss(ref)
+    
+    assert res["metrics"]["total_loss_kwh"] == 25.0
+    assert len(res["warnings"]) == 1
+    assert "High soiling loss detected (>15% of yield)" in res["warnings"][0]
+
 def test_estimate_soiling_loss_all_nulls():
     df = pd.DataFrame({
         "log_date": ["2023-01-01", "2023-01-02"],

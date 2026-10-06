@@ -205,26 +205,7 @@ def test_base_agent_latency_populated():
 # DataAgent – tool routing
 # ---------------------------------------------------------------------------
 
-def test_data_agent_constructs():
-    """DataAgent should construct without errors."""
-    mock_llm = MagicMock()
-    mock_llm.bind_tools.return_value = mock_llm
-    agent = DataAgent(llm=mock_llm)
-    assert agent.name == "data"
-    assert len(agent.tools) == 5
-
-
-def test_data_agent_only_has_data_tools():
-    """DataAgent must NOT have performance, fault, or environment tools."""
-    mock_llm = MagicMock()
-    mock_llm.bind_tools.return_value = mock_llm
-    agent = DataAgent(llm=mock_llm)
-    tool_names = {t.name for t in agent.tools}
-    assert "compute_kpis_tool" not in tool_names
-    assert "detect_zero_generation_tool" not in tool_names
-    assert "estimate_soiling_loss_tool" not in tool_names
-    assert "fetch_inverter_daily_tool" in tool_names
-
+# DataAgent is now LLM-free and directly executes tools, so we don't need tests for its LLM tools.
 
 # ---------------------------------------------------------------------------
 # PerformanceAgent – tool routing
@@ -250,11 +231,12 @@ def test_performance_agent_routes_compute_kpis():
         "warnings": [],
     }
     mock_llm = _build_mock_llm(
-        _ai_with_tool_call("compute_kpis_tool", {"data_ref": "df_raw", "level": "plant", "period": "total"}),
-        _ai_final("Plant PR is 0.866."),
+        _ai_final(json.dumps({"tool": "compute_kpis_tool", "args": {"data_ref": "df_raw", "level": "plant", "period": "total"}})),
     )
     agent = PerformanceAgent(llm=mock_llm)
-    agent._call_tool = lambda name, args: kpi_payload
+    mock_tool = MagicMock()
+    mock_tool.invoke.return_value = kpi_payload
+    agent._tool_map["compute_kpis_tool"] = mock_tool
     result = agent.run("t_perf_1", "Compute plant-level KPIs", {"data_ref": "df_raw"})
 
     assert result.status == TaskStatus.DONE
@@ -334,11 +316,12 @@ def test_environment_agent_routes_soiling_loss():
         "warnings": [],
     }
     mock_llm = _build_mock_llm(
-        _ai_with_tool_call("estimate_soiling_loss_tool", {"data_ref": "df_raw"}),
-        _ai_final("Soiling loss is ~89.8 MWh."),
+        _ai_final(json.dumps({"tool": "estimate_soiling_loss_tool", "args": {"data_ref": "df_raw"}})),
     )
     agent = EnvironmentAgent(llm=mock_llm)
-    agent._call_tool = lambda name, args: soiling_payload
+    mock_tool = MagicMock()
+    mock_tool.invoke.return_value = soiling_payload
+    agent._tool_map["estimate_soiling_loss_tool"] = mock_tool
     result = agent.run("t_env_1", "Estimate soiling", {"data_ref": "df_raw"})
 
     assert result.status == TaskStatus.DONE
@@ -354,16 +337,75 @@ def test_environment_agent_warning_propagated():
         "warnings": ["High soiling loss detected (>15% of yield). Estimated loss: 500000.0 kWh"],
     }
     mock_llm = _build_mock_llm(
-        _ai_with_tool_call("estimate_soiling_loss_tool", {"data_ref": "df_raw"}),
-        _ai_final("Warning: extremely high soiling detected."),
+        _ai_final(json.dumps({"tool": "estimate_soiling_loss_tool", "args": {"data_ref": "df_raw"}})),
     )
     agent = EnvironmentAgent(llm=mock_llm)
-    agent._call_tool = lambda name, args: soiling_payload
+    mock_tool = MagicMock()
+    mock_tool.invoke.return_value = soiling_payload
+    agent._tool_map["estimate_soiling_loss_tool"] = mock_tool
     result = agent.run("t_env_2", "Estimate soiling with high loss", {"data_ref": "df_raw"})
 
     assert result.status == TaskStatus.DONE
     # The payload warnings are logged; the agent summary mentions it
     assert "warning" in result.summary.lower() or result.metrics["total_loss_kwh"] > 0
+
+
+
+# ---------------------------------------------------------------------------
+# SingleCallAgent – error handling (item 5)
+# ---------------------------------------------------------------------------
+
+class TestSingleCallAgentErrorHandling:
+    """SingleCallAgent must return FAILED, not raise, for bad LLM output."""
+
+    def _perf_agent_with_response(self, content: str) -> PerformanceAgent:
+        mock_llm = _build_mock_llm(_ai_final(content))
+        return PerformanceAgent(llm=mock_llm)
+
+    def test_malformed_json_returns_failed(self):
+        """LLM returns garbage JSON → TaskStatus.FAILED with error message."""
+        agent = self._perf_agent_with_response("This is not JSON at all!")
+        result = agent.run("t_bad_json", "Compute KPIs", {"data_ref": "df_raw"})
+        assert result.status == TaskStatus.FAILED
+        assert result.error is not None
+        assert "malformed" in result.error.lower() or "json" in result.error.lower()
+
+    def test_partial_json_returns_failed(self):
+        """LLM returns incomplete JSON → TaskStatus.FAILED."""
+        agent = self._perf_agent_with_response('{"tool": "compute_kpis_tool"')
+        result = agent.run("t_partial_json", "Compute KPIs", {"data_ref": "df_raw"})
+        assert result.status == TaskStatus.FAILED
+        assert result.error is not None
+
+    def test_unknown_tool_returns_failed(self):
+        """LLM selects a tool that doesn't exist → TaskStatus.FAILED with clear message."""
+        import json as _json
+        agent = self._perf_agent_with_response(
+            _json.dumps({"tool": "nonexistent_tool_xyz", "args": {}})
+        )
+        result = agent.run("t_bad_tool", "Compute KPIs", {"data_ref": "df_raw"})
+        assert result.status == TaskStatus.FAILED
+        assert result.error is not None
+        assert "nonexistent_tool_xyz" in result.error or "unknown" in result.error.lower()
+
+    def test_empty_tool_field_returns_failed(self):
+        """LLM returns JSON with empty tool field → TaskStatus.FAILED."""
+        import json as _json
+        agent = self._perf_agent_with_response(
+            _json.dumps({"tool": "", "args": {}})
+        )
+        result = agent.run("t_empty_tool", "Compute KPIs", {"data_ref": "df_raw"})
+        assert result.status == TaskStatus.FAILED
+
+    def test_failed_result_does_not_raise(self):
+        """Error conditions must never propagate as exceptions from .run()."""
+        agent = self._perf_agent_with_response("not json")
+        # This must not raise
+        try:
+            result = agent.run("t_no_raise", "Compute KPIs", {"data_ref": "df_raw"})
+            assert result.status == TaskStatus.FAILED
+        except Exception as e:
+            pytest.fail(f"SingleCallAgent.run() raised instead of returning FAILED: {e}")
 
 
 # ---------------------------------------------------------------------------

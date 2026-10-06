@@ -61,6 +61,14 @@ class ValidationStatus(str, Enum):
 
 
 # ---------------------------------------------------------------------------
+# Exceptions
+# ---------------------------------------------------------------------------
+
+class BudgetExceeded(RuntimeError):
+    """Raised when the LLM call counter exceeds max_llm_calls_per_query."""
+
+
+# ---------------------------------------------------------------------------
 # Plan components
 # ---------------------------------------------------------------------------
 
@@ -315,3 +323,9 @@ class AgentState(TypedDict):
 
     # Whether the query was flagged as out-of-scope by the Orchestrator
     is_out_of_scope: bool
+
+    # Running count of LLM API calls made in this query
+    llm_call_count: int
+
+    # Per-invocation unique identifier for budget isolation (set by start_node)
+    run_id: Optional[str]

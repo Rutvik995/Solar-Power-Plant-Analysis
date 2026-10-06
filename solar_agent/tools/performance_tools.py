@@ -54,12 +54,22 @@ def compute_kpis(
     metrics_summary = {}
     if period == "total" and level == "plant":
         if not df_agg.empty:
-            row = df_agg.iloc[0]
-            metrics_summary = {
-                "performance_ratio": round(row.get("performance_ratio", float("nan")), 4),
-                "total_yield_kwh": round(row.get("total_daily_yield_kwh", 0), 2),
-                "expected_yield_kwh": round(row.get("expected_yield_kwh", 0), 2),
-            }
+            if len(df_agg) == 1:
+                row = df_agg.iloc[0]
+                metrics_summary = {
+                    "performance_ratio": round(row.get("performance_ratio", float("nan")), 4),
+                    "total_yield_kwh": round(row.get("total_daily_yield_kwh", 0), 2),
+                    "expected_yield_kwh": round(row.get("expected_yield_kwh", 0), 2),
+                }
+            else:
+                for _, row in df_agg.iterrows():
+                    pid = row.get("plant_id")
+                    if pd.notna(pid):
+                        pid = int(pid)
+                    else:
+                        pid = "unknown"
+                    metrics_summary[f"plant_{pid}_performance_ratio"] = round(row.get("performance_ratio", float("nan")), 4)
+                    metrics_summary[f"plant_{pid}_total_yield_kwh"] = round(row.get("total_daily_yield_kwh", 0), 2)
 
     return {
         "summary": f"Computed {period} KPIs at {level} level.",

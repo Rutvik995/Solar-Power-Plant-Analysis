@@ -1,0 +1,6 @@
+{
+  "91ac6fd43aa100f8ddd4690544230e59": {
+    "content": "{\n  \"intent\": \"comparison\",\n  \"scope\": {\n    \"plant_ids\": [],\n    \"block_ids\": [],\n    \"inverter_ids\": [],\n    \"start_date\": \"2026-09-01\",\n    \"end_date\": \"2026-09-30\"\n  },\n  \"tasks\": [\n    {\n      \"id\": \"t1\",\n      \"agent\": \"data\",\n      \"description\": \"Fetch daily generation telemetry for all plants for September 2026.\",\n      \"inputs\": {\n        \"plant_ids\": [],\n        \"start_date\": \"2026-09-01\",\n        \"end_date\": \"2026-09-30\"\n      },\n      \"depends_on\": []\n    },\n    {\n      \"id\": \"t2\",\n      \"agent\": \"performance\",\n      \"description\": \"Aggregate total yield by plant and rank plants to determine the highest producer.\",\n      \"inputs\": {\n        \"data_ref\": \"$t1.data_ref\",\n        \"metric\": \"total_yield\"\n      },\n      \"depends_on\": [\"t1\"]\n    }\n  ],\n  \"success_criteria\": \"Identify the plant with the highest total yield for September 2026 and provide a comparative ranking of all plants.\"\n}",
+    "tool_calls": []
+  }
+}

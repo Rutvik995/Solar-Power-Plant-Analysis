@@ -507,3 +507,38 @@ class TestAggregateKpis:
         actual_pr = result.iloc[0]["performance_ratio"]
         assert math.isclose(actual_pr, expected_pr, rel_tol=1e-5), \
             f"Expected PR={expected_pr:.4f}, got {actual_pr:.4f}"
+
+
+class TestMultiPlantKpis:
+    """compute_kpis(level='plant') must return one row per plant_id."""
+
+    def test_two_plants_produce_two_rows(self):
+        rows = [
+            _row(inverter_id=1, plant_id=1, rated_dc_kw=100.0,
+                 total_daily_yield_kwh=400.0,
+                 total_solar_radiation_kwh_m2=5.0),
+            _row(inverter_id=2, plant_id=2, rated_dc_kw=50.0,
+                 total_daily_yield_kwh=175.0,
+                 total_solar_radiation_kwh_m2=5.0),
+        ]
+        df = _df(*rows)
+        df_kpi = m.compute_all_kpis(df)
+        agg = m.aggregate_kpis(df_kpi, level="plant", period="total")
+        assert len(agg) == 2
+        assert set(agg["plant_id"].values) == {1, 2}
+
+    def test_two_plants_yields_are_independent(self):
+        rows = [
+            _row(inverter_id=1, plant_id=1, rated_dc_kw=100.0,
+                 total_daily_yield_kwh=400.0,
+                 total_solar_radiation_kwh_m2=5.0),  # PR=0.80
+            _row(inverter_id=2, plant_id=2, rated_dc_kw=50.0,
+                 total_daily_yield_kwh=100.0,
+                 total_solar_radiation_kwh_m2=5.0),  # PR=0.40
+        ]
+        df = _df(*rows)
+        df_kpi = m.compute_all_kpis(df)
+        agg = m.aggregate_kpis(df_kpi, level="plant", period="total")
+        agg = agg.sort_values("plant_id").reset_index(drop=True)
+        assert math.isclose(agg.iloc[0]["performance_ratio"], 0.80, rel_tol=1e-5)
+        assert math.isclose(agg.iloc[1]["performance_ratio"], 0.40, rel_tol=1e-5)

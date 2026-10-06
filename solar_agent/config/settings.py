@@ -39,16 +39,36 @@ class Settings(BaseSettings):
         description="Read-only PostgreSQL connection string (psycopg v3 driver).",
     )
 
-    # --- LLM Models ---
-    # Planner / Orchestrator / Synthesizer → high-quality reasoning
+    # --- LLM Models (per role) ---
+    # Provider choices: "gemini", "anthropic", "openai", "ollama"
+    planner_provider: str = Field(
+        default="gemini",
+        description="LLM provider for the Orchestrator (planner) role.",
+    )
     planner_model: str = Field(
-        default="gemini-2.5-pro",
+        default="gemini-3.8-flash",
         description="LLM model for Orchestrator and Synthesizer.",
     )
-    # Data Agent / Validator → cost-efficient, fast
+    agent_provider: str = Field(
+        default="gemini",
+        description="LLM provider for specialist agents (fault, performance, environment).",
+    )
+    agent_model: str = Field(
+        default="gemini-3.8-flash",
+        description="LLM model for specialist agents.",
+    )
+    synthesizer_provider: str = Field(
+        default="gemini",
+        description="LLM provider for the Synthesizer role.",
+    )
+    synthesizer_model: str = Field(
+        default="gemini-3.8-flash",
+        description="LLM model for the Synthesizer.",
+    )
+    # Data Agent / Validator → cost-efficient, fast (legacy alias)
     fast_model: str = Field(
-        default="gemini-2.5-flash",
-        description="LLM model for Data Agent and Validator.",
+        default="gemini-3.8-flash",
+        description="LLM model for Data Agent and Validator (legacy alias for agent_model).",
     )
     google_api_key: str = Field(
         default="",
@@ -138,6 +158,17 @@ class Settings(BaseSettings):
     task_timeout_seconds: int = Field(
         default=120,
         description="Per-task timeout in the DAG executor.",
+    )
+    task_max_retries: int = Field(
+        default=1,
+        description="Number of times the executor retries a failed task before marking it FAILED.",
+    )
+    max_llm_calls_per_query: int = Field(
+        default=12,
+        description=(
+            "Maximum number of LLM API calls allowed per query/thread. "
+            "When exceeded, BudgetExceeded is raised and the graph returns a partial answer."
+        ),
     )
 
     # --- 'Today' definition ---

@@ -58,6 +58,41 @@ def test_compute_kpis_plant_total():
     assert len(df_res) == 1
 
 
+def test_compute_kpis_multi_plant():
+    """Ensure two plants produce two rows and independent metrics."""
+    df = pd.DataFrame({
+        "log_date": ["2023-01-01", "2023-01-01"],
+        "plant_id": [1, 2],
+        "block_id": [1, 1],
+        "inverter_id": [101, 201],
+        "total_daily_yield_kwh": [400.0, 175.0],
+        "rated_dc_kw": [100.0, 50.0],
+        "rated_ac_kw": [90.0, 45.0],
+        "total_solar_radiation_kwh_m2": [5.0, 5.0],
+        "peak_dc_power_kw": [80.0, 40.0],
+        "peak_ac_power_kw": [75.0, 38.0],
+        "avg_dc_voltage_v": [600.0, 600.0],
+        "avg_dc_current_a": [133.3, 66.6],
+        "soiling_ratio": [1.0, 1.0],
+    })
+    ref = DataStore.store(df)
+    res = compute_kpis(ref, level="plant", period="total")
+    
+    # 2 plants in input => 2 sets of metrics
+    m = res["metrics"]
+    assert "plant_1_performance_ratio" in m
+    assert "plant_2_performance_ratio" in m
+    
+    # PR1 = 400 / (100 * 5) = 0.80
+    # PR2 = 175 / (50 * 5)  = 0.70
+    assert abs(m["plant_1_performance_ratio"] - 0.80) < 0.001
+    assert abs(m["plant_2_performance_ratio"] - 0.70) < 0.001
+    
+    # Ensure DataFrame correctly returns 2 rows
+    df_res = DataStore.get(res["data_ref"])
+    assert len(df_res) == 2
+
+
 def test_compute_kpis_inverter_daily():
     ref = DataStore.store(_make_df())
     res = compute_kpis(ref, level="inverter", period="daily")

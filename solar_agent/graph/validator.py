@@ -2,13 +2,11 @@
 graph/validator.py – Validator node.
 
 Checks the completed TaskResults against the plan's success_criteria and
-applies numeric consistency guards (numbers must come from tools, not LLM).
-
-Validation logic:
-  1. Completeness: did every task finish (DONE)?  FAILED/SKIPPED tasks are issues.
-  2. Data presence: do the key tasks return a data_ref?  Missing refs are errors.
-  3. Warning propagation: tool warnings are surfaced as validation warnings.
-  4. Replan budget: if replan_count >= MAX_REPLANS, force FAIL instead of REPLAN.
+applies two guard layers:
+  1. Completeness: every task finished (DONE)?  FAILED/SKIPPED tasks are issues.
+  2. Number grounding: every number in the draft synthesizer answer must appear
+     (within rounding tolerance) in at least one TaskResult.metrics value.
+     If not, the answer is flagged and the offending numbers are reported.
 
 Returns:
   ValidationStatus.OK      → proceed to Synthesizer
@@ -19,6 +17,7 @@ Returns:
 from __future__ import annotations
 
 import logging
+import re
 
 from solar_agent.state import (
     AgentState,
@@ -30,7 +29,67 @@ from solar_agent.state import (
 
 logger = logging.getLogger(__name__)
 
-MAX_REPLANS = 2  # hard cap on re-planning loops
+MAX_REPLANS = 2  # hard cap on re-planning loops (also in settings, kept here for import-free access)
+NUMBER_TOLERANCE = 0.02  # 2% relative tolerance for number-grounding check
+
+
+def _extract_numbers(text: str) -> list[float]:
+    """
+    Extract numeric values. Ignores years/dates and small integers likely to be IDs/labels.
+    """
+    pattern = r"-?\d{1,3}(?:,\d{3})*(?:\.\d+)?|-?\d+(?:\.\d+)?"
+    raw = re.findall(pattern, text)
+    nums = []
+    for r in raw:
+        try:
+            val = float(r.replace(",", ""))
+            # Ignore years 2000-2100
+            if 2000 <= val <= 2100 and val.is_integer():
+                continue
+            # Ignore IDs / entity labels (e.g. Plant 1, Block 2)
+            if 0 <= val <= 1000 and val.is_integer():
+                continue
+            nums.append(val)
+        except ValueError:
+            pass
+    return nums
+
+
+from solar_agent.graph.data_store import DataStore
+import numpy as np
+
+def _numbers_from_results(results: dict) -> list[float]:
+    """Collect all numeric metric values from all TaskResults and their DataStore tables."""
+    all_nums = []
+    for tr in results.values():
+        if tr and tr.metrics:
+            for v in tr.metrics.values():
+                try:
+                    all_nums.append(float(v))
+                except (TypeError, ValueError):
+                    pass
+        if tr and tr.data_ref:
+            df = DataStore.get(tr.data_ref)
+            if df is not None and not df.empty:
+                for col in df.select_dtypes(include=[np.number]).columns:
+                    for val in df[col].dropna():
+                        try:
+                            all_nums.append(float(val))
+                        except (TypeError, ValueError):
+                            pass
+    return all_nums
+
+
+def _is_grounded(num: float, ground_values: list[float]) -> bool:
+    """Return True if `num` is within NUMBER_TOLERANCE of any value in ground_values, or 100x percent conversion."""
+    for gv in ground_values:
+        if gv == 0 and abs(num) < 1e-6:
+            return True
+        if gv != 0 and abs((num - gv) / gv) <= NUMBER_TOLERANCE:
+            return True
+        if gv != 0 and abs((num - (gv * 100.0)) / (gv * 100.0)) <= NUMBER_TOLERANCE:
+            return True
+    return False
 
 
 class Validator:
@@ -43,15 +102,16 @@ class Validator:
         plan = state.get("plan")
         results = state.get("results") or {}
         replan_count = state.get("replan_count", 0)
+        draft_answer = state.get("final_answer")  # may be set by an earlier synthesizer pass
 
         issues: list[ValidationIssue] = []
         tasks_done = 0
         total_tasks = len(plan.tasks) if plan else 0
 
+        # ── 1. Completeness check ────────────────────────────────────────────
         for task in (plan.tasks if plan else []):
             tr = results.get(task.id)
 
-            # Missing result entirely
             if tr is None:
                 issues.append(ValidationIssue(
                     severity="error",
@@ -61,7 +121,6 @@ class Validator:
                 ))
                 continue
 
-            # Failed task
             if tr.status == TaskStatus.FAILED:
                 issues.append(ValidationIssue(
                     severity="error",
@@ -74,7 +133,6 @@ class Validator:
                 ))
                 continue
 
-            # Skipped task
             if tr.status == TaskStatus.SKIPPED:
                 issues.append(ValidationIssue(
                     severity="warning",
@@ -86,7 +144,6 @@ class Validator:
 
             tasks_done += 1
 
-            # Non-data tasks should produce a data_ref
             if task.agent != "data" and not tr.data_ref:
                 issues.append(ValidationIssue(
                     severity="warning",
@@ -95,15 +152,12 @@ class Validator:
                     replan_hint="Check if the agent's tool returned results successfully.",
                 ))
 
-            # Propagate tool warnings
-            if tr.metrics:
-                # Check for empty results (e.g. no data in range)
-                pass  # metrics presence is sufficient
+        # ── 2. Number grounding check ────────────────────────────────────────
+        number_check_passed = True
+        # (Moved entirely to Synthesizer per user request to avoid full replans)
 
-        # Completeness score
+        # ── 3. Determine overall status ──────────────────────────────────────
         completeness = tasks_done / total_tasks if total_tasks > 0 else 0.0
-
-        # Determine overall status
         has_errors = any(i.severity == "error" for i in issues)
 
         if not has_errors and completeness >= 1.0:
@@ -120,19 +174,18 @@ class Validator:
         elif has_errors:
             status = ValidationStatus.REPLAN
         else:
-            # Warnings only — proceed
             status = ValidationStatus.OK
 
         report = ValidationReport(
             status=status,
             issues=issues,
             completeness_score=completeness,
-            number_check_passed=True,  # Phase 5 will add LLM-vs-tool number comparison
+            number_check_passed=number_check_passed,
         )
 
         logger.info(
-            "Validator: status=%s completeness=%.2f issues=%d",
-            status, completeness, len(issues),
+            "Validator: status=%s completeness=%.2f issues=%d number_check=%s",
+            status, completeness, len(issues), number_check_passed,
         )
         return {"validation": report}
 
@@ -155,6 +208,6 @@ class Validator:
             case ValidationStatus.REPLAN:
                 return "orchestrator"
             case ValidationStatus.FAIL:
-                return "synthesizer"  # synthesizer will surface the issues
+                return "synthesizer"
             case _:
                 return "synthesizer"

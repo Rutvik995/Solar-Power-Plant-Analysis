@@ -59,6 +59,8 @@ def _base_state(**overrides) -> AgentState:
         "final_answer": None,
         "assumptions": [],
         "is_out_of_scope": False,
+        "llm_call_count": 0,
+        "run_id": "test-run-id",
     }
     s.update(overrides)
     return AgentState(**s)
@@ -385,6 +387,74 @@ class TestValidator:
     def test_no_validation_routes_to_executor(self):
         state = _base_state(validation=None)
         assert Validator.route(state) == "executor"
+
+# ===========================================================================
+# Synthesizer tests (Grounding)
+# ===========================================================================
+
+class TestSynthesizer:
+    
+    def test_number_grounding_passes_when_all_numbers_match(self):
+        """Numbers in the draft answer that exist in tool metrics should pass."""
+        from solar_agent.graph.synthesizer import Synthesizer
+        plan = _minimal_plan()
+        results = {
+            "t1": _done_result("t1", metrics={"performance_ratio": 0.866, "total_yield_kwh": 2351535.09}),
+            "t2": _done_result("t2", metrics={"performance_ratio": 0.866}),
+        }
+        state = _base_state(plan=plan, results=results)
+        
+        mock_llm = MagicMock()
+        mock_llm.invoke.return_value = AIMessage(content="The plant PR is 0.866 and total yield was 2,351,535 kWh.")
+        
+        s = Synthesizer(llm=mock_llm)
+        patch = s.synthesize(state)
+        
+        assert "The plant PR is 0.866" in patch["final_answer"]
+        # Generated once, no retry needed
+        assert mock_llm.invoke.call_count == 1
+
+    def test_number_grounding_fails_and_retries_then_falls_back(self):
+        """A fabricated number causes a retry, and if still failing, falls back to metrics."""
+        from solar_agent.graph.synthesizer import Synthesizer
+        plan = _minimal_plan()
+        results = {
+            "t1": _done_result("t1", metrics={"performance_ratio": 0.866, "total_yield_kwh": 2351535.09}),
+        }
+        state = _base_state(plan=plan, results=results)
+        
+        mock_llm = MagicMock()
+        # Always hallucinate a bad number
+        mock_llm.invoke.return_value = AIMessage(content="The plant lost 9,999,999 kWh due to faults.")
+        
+        s = Synthesizer(llm=mock_llm)
+        patch = s.synthesize(state)
+        
+        # Generated twice (initial + 1 retry)
+        assert mock_llm.invoke.call_count == 2
+        
+        # Fell back to template
+        assert "raw metrics (fallback" in patch["final_answer"]
+        assert "2351535.09" in patch["final_answer"]
+
+    def test_number_grounding_tolerates_rounding(self):
+        """Numbers rounded slightly from the tool output should still pass (2% tolerance)."""
+        from solar_agent.graph.synthesizer import Synthesizer
+        plan = _minimal_plan()
+        results = {
+            "t1": _done_result("t1", metrics={"total_loss_kwh": 89771.84}),
+        }
+        state = _base_state(plan=plan, results=results)
+        
+        mock_llm = MagicMock()
+        mock_llm.invoke.return_value = AIMessage(content="Soiling loss was approximately 89,800 kWh.")
+        
+        s = Synthesizer(llm=mock_llm)
+        patch = s.synthesize(state)
+        
+        assert "89,800" in patch["final_answer"]
+        assert mock_llm.invoke.call_count == 1
+
 
 
 # ===========================================================================

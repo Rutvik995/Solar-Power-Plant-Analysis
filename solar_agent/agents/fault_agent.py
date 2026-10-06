@@ -17,6 +17,7 @@ Allowed tools: detect_zero_generation_tool, detect_status_faults_tool,
 from __future__ import annotations
 
 from langchain_core.tools import tool
+from pydantic import BaseModel, ConfigDict, Field
 
 from solar_agent.agents.base_agent import BaseSpecialistAgent
 from solar_agent.prompts.agent_prompts import FAULT_AGENT_PROMPT
@@ -28,7 +29,12 @@ from solar_agent.tools.fault_tools import (
 )
 
 
-@tool
+class DetectZeroGenerationSchema(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    data_ref: str
+    irradiance_threshold_kwh_m2: float = Field(default=0.5)
+
+@tool(args_schema=DetectZeroGenerationSchema)
 def detect_zero_generation_tool(data_ref: str, irradiance_threshold_kwh_m2: float = 0.5) -> dict:
     """
     Identify inverter-days where yield is 0 kWh despite sufficient irradiance.
@@ -41,7 +47,11 @@ def detect_zero_generation_tool(data_ref: str, irradiance_threshold_kwh_m2: floa
     return detect_zero_generation(data_ref, irradiance_threshold_kwh_m2=irradiance_threshold_kwh_m2)
 
 
-@tool
+class DetectStatusFaultsSchema(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    data_ref: str
+
+@tool(args_schema=DetectStatusFaultsSchema)
 def detect_status_faults_tool(data_ref: str) -> dict:
     """
     Identify inverter-days with fault/warning/offline status codes (>= 2).
@@ -53,7 +63,11 @@ def detect_status_faults_tool(data_ref: str) -> dict:
     return detect_status_faults(data_ref)
 
 
-@tool
+class DetectPeerUnderperformanceSchema(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    data_ref: str
+
+@tool(args_schema=DetectPeerUnderperformanceSchema)
 def detect_peer_underperformance_tool(data_ref: str) -> dict:
     """
     Flag inverters whose PR z-score vs block-median falls below the configured
@@ -65,7 +79,13 @@ def detect_peer_underperformance_tool(data_ref: str) -> dict:
     return detect_peer_underperformance(data_ref)
 
 
-@tool
+class DetectAnomaliesSchema(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    data_ref: str
+    z_threshold: float = Field(default=3.0)
+    window: int = Field(default=7)
+
+@tool(args_schema=DetectAnomaliesSchema)
 def detect_anomalies_tool(data_ref: str, z_threshold: float = 3.0, window: int = 7) -> dict:
     """
     Statistical anomaly detection using rolling z-score on PR, DC voltage, and DC current.

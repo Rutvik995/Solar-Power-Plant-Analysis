@@ -13,8 +13,9 @@ Allowed tools: compute_kpis_tool, rank_entities_tool, compare_periods_tool, tren
 from __future__ import annotations
 
 from langchain_core.tools import tool
+from pydantic import BaseModel, ConfigDict, Field
 
-from solar_agent.agents.base_agent import BaseSpecialistAgent
+from solar_agent.agents.base_agent import SingleCallAgent
 from solar_agent.prompts.agent_prompts import PERFORMANCE_AGENT_PROMPT
 from solar_agent.tools.performance_tools import (
     compare_periods,
@@ -24,7 +25,13 @@ from solar_agent.tools.performance_tools import (
 )
 
 
-@tool
+class ComputeKpisSchema(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    data_ref: str
+    level: str = Field(default="plant")
+    period: str = Field(default="total")
+
+@tool(args_schema=ComputeKpisSchema)
 def compute_kpis_tool(data_ref: str, level: str = "plant", period: str = "total") -> dict:
     """
     Compute solar KPIs (PR, yield, capacity factor, efficiency) aggregated to
@@ -38,7 +45,14 @@ def compute_kpis_tool(data_ref: str, level: str = "plant", period: str = "total"
     return compute_kpis(data_ref, level=level, period=period)
 
 
-@tool
+class RankEntitiesSchema(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    data_ref: str
+    metric: str = Field(default="performance_ratio")
+    ascending: bool = Field(default=False)
+    top_n: int = Field(default=10)
+
+@tool(args_schema=RankEntitiesSchema)
 def rank_entities_tool(
     data_ref: str,
     metric: str = "performance_ratio",
@@ -58,7 +72,14 @@ def rank_entities_tool(
     return rank_entities(data_ref, metric=metric, ascending=ascending, top_n=top_n)
 
 
-@tool
+class ComparePeriodsSchema(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    ref_current: str
+    ref_baseline: str
+    join_cols: list[str]
+    metrics_to_compare: list[str] = None
+
+@tool(args_schema=ComparePeriodsSchema)
 def compare_periods_tool(
     ref_current: str,
     ref_baseline: str,
@@ -84,7 +105,13 @@ def compare_periods_tool(
     )
 
 
-@tool
+class TrendAnalysisSchema(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    data_ref: str
+    metric: str = Field(default="performance_ratio")
+    window_days: int = Field(default=7)
+
+@tool(args_schema=TrendAnalysisSchema)
 def trend_analysis_tool(
     data_ref: str,
     metric: str = "performance_ratio",
@@ -102,9 +129,9 @@ def trend_analysis_tool(
     return trend_analysis(data_ref, metric=metric, window_days=window_days)
 
 
-class PerformanceAgent(BaseSpecialistAgent):
+class PerformanceAgent(SingleCallAgent):
     name = "performance"
-    system_prompt = PERFORMANCE_AGENT_PROMPT
+    # system_prompt is unused in SingleCallAgent (it builds its own from tool descriptions)
     tools = [
         compute_kpis_tool,
         rank_entities_tool,

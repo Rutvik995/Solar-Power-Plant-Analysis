@@ -10,6 +10,8 @@ Design:
   - All tasks in a layer have no inter-dependencies and run concurrently.
   - Input references like "$t1.data_ref" are resolved from completed TaskResults.
   - A task whose dependency failed is marked SKIPPED (not executed).
+  - Per-task timeout (settings.task_timeout_seconds) and one retry
+    (settings.task_max_retries) are applied before marking a task FAILED.
   - The executor runs ONE layer per graph node call; the LangGraph edge
     re-routes back to the executor until all layers are done.
 """
@@ -17,19 +19,40 @@ Design:
 from __future__ import annotations
 
 import logging
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import time
+from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from typing import Any
 
 from solar_agent.agents.data_agent import DataAgent
 from solar_agent.agents.environment_agent import EnvironmentAgent
 from solar_agent.agents.fault_agent import FaultAgent
 from solar_agent.agents.performance_agent import PerformanceAgent
-from solar_agent.state import AgentState, Plan, Task, TaskResult, TaskStatus
+from solar_agent.config.settings import settings
+from solar_agent.state import AgentState, Plan, Task, TaskResult, TaskStatus, BudgetExceeded
 
 logger = logging.getLogger(__name__)
 
 # Maximum parallel workers per layer
 MAX_WORKERS = 4
+
+# ---------------------------------------------------------------------------
+# Retry classification
+# ---------------------------------------------------------------------------
+
+_NON_RETRYABLE_FRAGMENTS = frozenset([
+    "429",               # rate-limit – back off at a higher level, not here
+    "401", "403",        # auth errors
+    "auth",              # generic auth failure
+    "validation",        # schema / request validation
+    "resourceexhausted", # Google quota
+    "invalid_argument",  # bad request
+])
+
+
+def _is_non_retryable(err_str: str) -> bool:
+    """Return True if the error should NOT be retried (fail fast)."""
+    s = err_str.lower()
+    return any(fragment in s for fragment in _NON_RETRYABLE_FRAGMENTS)
 
 
 # ---------------------------------------------------------------------------
@@ -62,7 +85,6 @@ def _resolve_refs(inputs: dict[str, Any], results: dict[str, TaskResult]) -> dic
                     break
             resolved[key] = obj
         elif isinstance(val, list):
-            # Resolve any refs inside lists
             resolved[key] = [
                 _resolve_refs({"v": item}, results).get("v", item)
                 if isinstance(item, str) and item.startswith("$")
@@ -97,7 +119,7 @@ class Executor:
     # LangGraph node entry point
     # ------------------------------------------------------------------
 
-    def run_next_layer(self, state: AgentState) -> dict:
+    def run_next_layer(self, state: AgentState, run_id: str = "__default__") -> dict:
         """
         Execute the next pending layer of the plan.
         Returns a state patch with updated `results`.
@@ -109,7 +131,6 @@ class Executor:
 
         results: dict[str, TaskResult] = dict(state.get("results") or {})
 
-        # Determine which tasks are still pending
         layers = plan.topological_layers()
         next_layer_ids = self._find_next_layer(layers, results)
 
@@ -117,15 +138,20 @@ class Executor:
             logger.info("Executor: no more pending tasks.")
             return {"results": results}
 
-        # Fetch the full Task objects for this layer
         task_map = {t.id: t for t in plan.tasks}
         layer_tasks = [task_map[tid] for tid in next_layer_ids]
 
         logger.info("Executor: running layer %s", next_layer_ids)
-        new_results = self._run_layer(layer_tasks, results)
-        results.update(new_results)
-
-        return {"results": results}
+        try:
+            new_results = self._run_layer(layer_tasks, results, run_id=run_id)
+            results.update(new_results)
+            return {"results": results}
+        except BudgetExceeded as exc:
+            # The exception might have partial results attached from _run_layer
+            if hasattr(exc, "partial_results"):
+                results.update(exc.partial_results)
+            exc.partial_results = results
+            raise exc
 
     # ------------------------------------------------------------------
     # Layer execution
@@ -146,13 +172,14 @@ class Executor:
         return []
 
     def _run_layer(
-        self, tasks: list[Task], results: dict[str, TaskResult]
+        self, tasks: list[Task], results: dict[str, TaskResult], run_id: str = "__default__"
     ) -> dict[str, TaskResult]:
-        """Run all tasks in this layer concurrently. Return new TaskResult dict."""
+        """Run all tasks in this layer concurrently with timeout + retry."""
         new_results: dict[str, TaskResult] = {}
 
         with ThreadPoolExecutor(max_workers=min(MAX_WORKERS, len(tasks))) as pool:
-            futures = {}
+            futures: dict[Future, Task] = {}
+
             for task in tasks:
                 # Skip if any dependency failed
                 failed_deps = [
@@ -170,7 +197,6 @@ class Executor:
                     )
                     continue
 
-                # Resolve input references
                 inputs = _resolve_refs(task.inputs, results)
                 agent = self._agents.get(task.agent)
                 if agent is None:
@@ -181,26 +207,88 @@ class Executor:
                     )
                     continue
 
-                fut = pool.submit(agent.run, task.id, task.description, inputs)
-                futures[fut] = task.id
+                fut = pool.submit(self._run_with_retry, task, inputs, agent, run_id)
+                futures[fut] = task
 
-            for fut in as_completed(futures):
-                tid = futures[fut]
+            timeout = settings.task_timeout_seconds
+            for fut, task in futures.items():
                 try:
-                    result = fut.result()
-                    new_results[tid] = result
+                    result = fut.result(timeout=timeout)
+                    new_results[task.id] = result
                     logger.info(
-                        "Task '%s' completed with status=%s.", tid, result.status
+                        "Task '%s' completed with status=%s.", task.id, result.status
                     )
+                except FutureTimeoutError:
+                    logger.error("Task '%s' timed out after %ds.", task.id, timeout)
+                    new_results[task.id] = TaskResult(
+                        task_id=task.id,
+                        status=TaskStatus.FAILED,
+                        error=f"Task timed out after {timeout} seconds.",
+                    )
+                except BudgetExceeded as exc:
+                    exc.partial_results = new_results
+                    raise
                 except Exception as exc:
-                    logger.exception("Task '%s' raised unexpectedly: %s", tid, exc)
-                    new_results[tid] = TaskResult(
-                        task_id=tid,
+                    logger.exception("Task '%s' raised unexpectedly: %s", task.id, exc)
+                    new_results[task.id] = TaskResult(
+                        task_id=task.id,
                         status=TaskStatus.FAILED,
                         error=str(exc),
                     )
 
         return new_results
+
+    def _run_with_retry(self, task: Task, inputs: dict, agent, run_id: str = "__default__") -> TaskResult:
+        """
+        Run a task with up to settings.task_max_retries retries on failure.
+        - Retries only transient errors (timeout, 5xx, connection).
+        - Fails fast on 429, 401, 403, auth errors, and validation errors.
+        Each retry waits 2 seconds before re-attempting.
+        """
+        max_attempts = 1 + settings.task_max_retries
+        last_result: TaskResult | None = None
+
+        for attempt in range(max_attempts):
+            try:
+                result = agent.run(task.id, task.description, inputs, run_id=run_id)
+                if result.status == TaskStatus.DONE:
+                    return result
+
+                err_str = str(result.error).lower()
+                if _is_non_retryable(err_str):
+                    logger.error("Fail-fast error detected in task %s: %s", task.id, result.error)
+                    return result
+
+                last_result = result
+                if attempt < max_attempts - 1:
+                    logger.warning(
+                        "Task '%s' failed on attempt %d/%d (%s). Retrying...",
+                        task.id, attempt + 1, max_attempts, result.error,
+                    )
+                    time.sleep(2)
+            except BudgetExceeded:
+                raise
+            except Exception as exc:
+                err_str = str(exc).lower()
+                last_result = TaskResult(
+                    task_id=task.id,
+                    status=TaskStatus.FAILED,
+                    error=str(exc),
+                )
+                if _is_non_retryable(err_str):
+                    logger.error("Fail-fast error raised in task %s: %s", task.id, exc)
+                    return last_result
+
+                if attempt < max_attempts - 1:
+                    logger.warning(
+                        "Task '%s' raised on attempt %d/%d: %s. Retrying...",
+                        task.id, attempt + 1, max_attempts, exc,
+                    )
+                    time.sleep(2)
+
+        return last_result or TaskResult(
+            task_id=task.id, status=TaskStatus.FAILED, error="All attempts failed."
+        )
 
     # ------------------------------------------------------------------
     # Utility: check if all tasks are done

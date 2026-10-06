@@ -1,11 +1,16 @@
 """
-base_agent.py – Shared base class for all specialist LangGraph tool-calling agents.
+base_agent.py – Shared base classes for all specialist LangGraph tool-calling agents.
 
-Each subclass binds its own tools and system prompt. The `run` method:
-  1. Builds a ToolNode
-  2. Invokes the LLM with bound tools in a ReAct loop (max `max_iterations`)
-  3. Parses the final ToolMessage sequence into a TaskResult
-  4. Returns a populated TaskResult without ever putting a DataFrame in LLM context
+Two agent modes:
+  ┌────────────────────────────────────────────────────────────────────────┐
+  │  BaseSpecialistAgent (ReAct loop, max 5 iterations)                   │
+  │    • Used by FaultAgent (must cross-reference multiple tools)          │
+  │                                                                        │
+  │  SingleCallAgent (1 LLM call → tool selection → direct execution)     │
+  │    • Used by PerformanceAgent and EnvironmentAgent                     │
+  │    • Pattern: LLM picks the tool + args → we run it → done            │
+  │    • Never more than 1 LLM call per task                              │
+  └────────────────────────────────────────────────────────────────────────┘
 """
 
 from __future__ import annotations
@@ -18,23 +23,21 @@ from typing import Any
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import BaseTool
 
-from solar_agent.state import TaskResult, TaskStatus
+from solar_agent.state import TaskResult, TaskStatus, BudgetExceeded
 
 logger = logging.getLogger(__name__)
 
-MAX_ITERATIONS = 5  # hard cap on tool-call rounds per agent run
+MAX_ITERATIONS = 5  # hard cap on ReAct rounds for FaultAgent
 
+
+# ---------------------------------------------------------------------------
+# 1. ReAct loop base (FaultAgent)
+# ---------------------------------------------------------------------------
 
 class BaseSpecialistAgent:
     """
-    Base class for Data, Performance, Fault, and Environment agents.
-
-    Subclasses MUST define:
-        name: str           — unique agent identifier (matches AgentName enum)
-        system_prompt: str  — the system message injected before each task
-        tools: list[BaseTool]  — the tools this agent is allowed to call
-
-    The LLM is injected at runtime so tests can mock it.
+    ReAct loop agent. Each run() may use up to MAX_ITERATIONS LLM calls.
+    Subclasses define: name, system_prompt, tools.
     """
 
     name: str = "base"
@@ -47,23 +50,10 @@ class BaseSpecialistAgent:
         self._llm = llm.bind_tools(self.tools)
         self._tool_map: dict[str, BaseTool] = {t.name: t for t in self.tools}
 
-    # ------------------------------------------------------------------
-    # Public interface
-    # ------------------------------------------------------------------
-
-    def run(self, task_id: str, description: str, inputs: dict[str, Any]) -> TaskResult:
-        """
-        Execute the agent on a single Task and return a TaskResult.
-
-        Args:
-            task_id:     The task's unique ID (for result attribution).
-            description: Human-readable task description.
-            inputs:      Dict of input parameters forwarded to the agent.
-        """
+    def run(self, task_id: str, description: str, inputs: dict[str, Any], run_id: str = "__default__") -> TaskResult:
         t_start = time.monotonic()
         tool_calls_made: list[str] = []
 
-        # Build initial message list
         human_text = self._format_human_message(description, inputs)
         messages: list = [
             SystemMessage(content=self.system_prompt),
@@ -72,30 +62,31 @@ class BaseSpecialistAgent:
 
         try:
             for _iteration in range(MAX_ITERATIONS):
-                response: AIMessage = self._llm.invoke(messages)
+                response: AIMessage = self._llm.invoke(messages, run_id=run_id)
                 messages.append(response)
 
-                # If no tool calls, the LLM has finished
                 if not response.tool_calls:
                     break
 
-                # Execute every tool call in this round
                 for tc in response.tool_calls:
                     tool_name = tc["name"]
                     tool_args = tc["args"]
                     tool_calls_made.append(tool_name)
-                    logger.debug("Agent '%s' calling tool '%s' with %s", self.name, tool_name, tool_args)
-
-                    tool_output = self._call_tool(tool_name, tool_args)
-                    tool_msg = ToolMessage(
-                        content=json.dumps(tool_output, default=str),
-                        tool_call_id=tc["id"],
+                    logger.debug(
+                        "Agent '%s' calling tool '%s' with %s", self.name, tool_name, tool_args
                     )
-                    messages.append(tool_msg)
+                    tool_output = self._call_tool(tool_name, tool_args)
+                    messages.append(
+                        ToolMessage(
+                            content=json.dumps(tool_output, default=str),
+                            tool_call_id=tc["id"],
+                        )
+                    )
 
-            # Parse final AIMessage into a TaskResult
             result = self._parse_result(task_id, messages, tool_calls_made)
 
+        except BudgetExceeded:
+            raise
         except Exception as exc:
             logger.exception("Agent '%s' failed on task '%s': %s", self.name, task_id, exc)
             result = TaskResult(
@@ -107,10 +98,6 @@ class BaseSpecialistAgent:
 
         result.latency_ms = (time.monotonic() - t_start) * 1000
         return result
-
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
 
     def _format_human_message(self, description: str, inputs: dict[str, Any]) -> str:
         parts = [f"Task: {description}"]
@@ -125,7 +112,6 @@ class BaseSpecialistAgent:
         return "\n".join(parts)
 
     def _call_tool(self, name: str, args: dict) -> Any:
-        """Invoke a tool by name. Raises if tool not found."""
         tool = self._tool_map.get(name)
         if tool is None:
             raise ValueError(f"Tool '{name}' is not available to agent '{self.name}'.")
@@ -137,18 +123,15 @@ class BaseSpecialistAgent:
         messages: list,
         tool_calls_made: list[str],
     ) -> TaskResult:
-        """
-        Extract the final AI response and the most recent tool outputs to build a TaskResult.
-        The LLM provides the summary; numbers come from tool ToolMessages.
-        """
-        # Gather the last AI message for the summary
         final_ai_msg = next(
-            (m for m in reversed(messages) if isinstance(m, AIMessage)),
-            None,
+            (m for m in reversed(messages) if isinstance(m, AIMessage)), None
         )
-        summary = final_ai_msg.content if final_ai_msg and isinstance(final_ai_msg.content, str) else ""
+        summary = (
+            final_ai_msg.content
+            if final_ai_msg and isinstance(final_ai_msg.content, str)
+            else ""
+        )
 
-        # Collect the last ToolMessage from each unique tool call to grab metrics/data_refs
         metrics: dict[str, Any] = {}
         data_ref: str | None = None
         warnings: list[str] = []
@@ -158,7 +141,6 @@ class BaseSpecialistAgent:
                 try:
                     payload = json.loads(msg.content)
                     if isinstance(payload, dict):
-                        # Grab data_ref from the most recent tool output that has one
                         if "data_ref" in payload and payload["data_ref"]:
                             data_ref = payload["data_ref"]
                         if "metrics" in payload and isinstance(payload["metrics"], dict):
@@ -176,3 +158,152 @@ class BaseSpecialistAgent:
             metrics=metrics if metrics else None,
             tool_calls_made=tool_calls_made,
         )
+
+
+# ---------------------------------------------------------------------------
+# 2. Single-call structured agent (PerformanceAgent, EnvironmentAgent)
+# ---------------------------------------------------------------------------
+
+_TOOL_SELECT_SYSTEM = """\
+You are a specialist tool selector. Given the task description and inputs,
+respond with a JSON object that selects EXACTLY ONE tool to call and its arguments.
+
+Response format (JSON only, no markdown fences):
+{{
+  "tool": "<tool_name>",
+  "args": {{<argument key-value pairs>}}
+}}
+
+Available tools:
+{tool_descriptions}
+
+Rules:
+1. Pick exactly one tool — the most appropriate one for the task.
+2. Fill args from the task inputs. Use the data_ref from inputs if available.
+3. Never fabricate data or compute answers yourself.
+4. Respond with valid JSON only.
+"""
+
+
+class SingleCallAgent:
+    """
+    One-LLM-call agent for deterministic, single-tool tasks.
+
+    Flow per run():
+      1. One LLM call → structured JSON {tool, args}
+      2. Parse the JSON, call the tool directly (no further LLM calls)
+      3. Build TaskResult from the tool output deterministically
+
+    Maximum LLM calls per task: 1
+    """
+
+    name: str = "single_call"
+    tools: list[BaseTool] = []
+
+    def __init__(self, llm):
+        if not self.tools:
+            raise ValueError(f"Agent '{self.name}' must define at least one tool.")
+        self._tool_map: dict[str, BaseTool] = {t.name: t for t in self.tools}
+        # Build tool descriptions for the system prompt
+        tool_descs = "\n".join(
+            f"  - {t.name}: {(t.description or '').split(chr(10))[0]}"
+            for t in self.tools
+        )
+        system_content = _TOOL_SELECT_SYSTEM.format(tool_descriptions=tool_descs)
+        self._system_msg = SystemMessage(content=system_content)
+        # Bind WITHOUT tools so the LLM returns plain JSON text (not tool_calls)
+        self._llm = llm
+
+    def run(self, task_id: str, description: str, inputs: dict[str, Any], run_id: str = "__default__") -> TaskResult:
+        t_start = time.monotonic()
+        tool_calls_made: list[str] = []
+
+        # Build human message
+        human_parts = [f"Task: {description}", "\nInputs:"]
+        for k, v in inputs.items():
+            human_parts.append(f"  {k}: {v}")
+        human_text = "\n".join(human_parts)
+
+        try:
+            # --- Single LLM call: ask it to pick a tool ---
+            response: AIMessage = self._llm.invoke(
+                [self._system_msg, HumanMessage(content=human_text)],
+                run_id=run_id,
+            )
+            raw = response.content.strip()
+            if raw.startswith("```"):
+                raw = raw.split("```")[1].lstrip("json").strip()
+
+            # ── malformed JSON → return FAILED immediately (item 5) ──
+            try:
+                selection = json.loads(raw)
+            except (json.JSONDecodeError, ValueError) as parse_err:
+                logger.error(
+                    "SingleCallAgent[%s] malformed JSON from LLM: %s | raw=%r",
+                    task_id, parse_err, raw[:120],
+                )
+                return TaskResult(
+                    task_id=task_id,
+                    status=TaskStatus.FAILED,
+                    error=f"Malformed JSON from LLM: {parse_err}",
+                    tool_calls_made=tool_calls_made,
+                    latency_ms=(time.monotonic() - t_start) * 1000,
+                )
+
+            tool_name = selection.get("tool", "")
+            tool_args = selection.get("args", {})
+
+            # ── unknown tool → return FAILED immediately (item 5) ──
+            tool = self._tool_map.get(tool_name)
+            if tool is None:
+                logger.error(
+                    "SingleCallAgent[%s] unknown tool '%s'. Available: %s",
+                    task_id, tool_name, list(self._tool_map.keys()),
+                )
+                return TaskResult(
+                    task_id=task_id,
+                    status=TaskStatus.FAILED,
+                    error=(
+                        f"LLM selected unknown tool '{tool_name}'. "
+                        f"Available: {list(self._tool_map.keys())}"
+                    ),
+                    tool_calls_made=tool_calls_made,
+                    latency_ms=(time.monotonic() - t_start) * 1000,
+                )
+
+            logger.info(
+                "SingleCallAgent[%s]: executing tool '%s' with args=%s",
+                task_id, tool_name, tool_args,
+            )
+            tool_calls_made.append(tool_name)
+            tool_output = tool.invoke(tool_args)
+
+            # --- Deterministic result summary ---
+            data_ref = tool_output.get("data_ref")
+            metrics = tool_output.get("metrics") or {}
+            warnings = tool_output.get("warnings") or []
+            summary_text = tool_output.get("summary", f"Tool '{tool_name}' completed.")
+
+            return TaskResult(
+                task_id=task_id,
+                status=TaskStatus.DONE,
+                summary=summary_text,
+                data_ref=data_ref,
+                metrics=metrics if metrics else None,
+                tool_calls_made=tool_calls_made,
+                latency_ms=(time.monotonic() - t_start) * 1000,
+            )
+
+        except BudgetExceeded:
+            raise
+        except Exception as exc:
+            logger.exception(
+                "SingleCallAgent[%s] failed: %s", task_id, exc
+            )
+            return TaskResult(
+                task_id=task_id,
+                status=TaskStatus.FAILED,
+                error=str(exc),
+                tool_calls_made=tool_calls_made,
+                latency_ms=(time.monotonic() - t_start) * 1000,
+            )

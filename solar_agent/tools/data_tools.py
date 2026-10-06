@@ -30,6 +30,7 @@ import sqlglot
 import yaml
 from langchain_core.tools import tool
 from thefuzz import process as fuzzy_process
+from pydantic import BaseModel, ConfigDict, Field
 
 from solar_agent.config.settings import settings, SEMANTIC_LAYER_PATH
 from solar_agent.db import queries as q
@@ -77,7 +78,10 @@ def _invalidate_entity_caches() -> None:
 # 1. get_schema_info
 # ---------------------------------------------------------------------------
 
-@tool
+class GetSchemaInfoSchema(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+@tool(args_schema=GetSchemaInfoSchema)
 def get_schema_info() -> str:
     """
     Returns the semantic layer YAML as a formatted string.
@@ -136,7 +140,13 @@ def get_schema_info() -> str:
 # 2. resolve_entities
 # ---------------------------------------------------------------------------
 
-@tool
+class ResolveEntitiesSchema(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    plant_names: Optional[list[str]] = None
+    block_names: Optional[list[str]] = None
+    inverter_ids_raw: Optional[list[str]] = None
+
+@tool(args_schema=ResolveEntitiesSchema)
 def resolve_entities(
     plant_names: Optional[list[str]] = None,
     block_names: Optional[list[str]] = None,
@@ -230,7 +240,11 @@ def resolve_entities(
 # 3. resolve_date_range
 # ---------------------------------------------------------------------------
 
-@tool
+class ResolveDateRangeSchema(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    text: str
+
+@tool(args_schema=ResolveDateRangeSchema)
 def resolve_date_range(text: str) -> dict:
     """
     Parses natural-language date expressions into concrete start/end dates.
@@ -534,7 +548,11 @@ def _validate_sql_security(sql: str) -> None:
                 )
 
 
-@tool
+class RunSqlReadonlySchema(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    sql: str
+
+@tool(args_schema=RunSqlReadonlySchema)
 def run_sql_readonly(sql: str) -> dict:
     """
     Executes a validated, read-only SQL SELECT against the database.
@@ -595,13 +613,21 @@ def run_sql_readonly(sql: str) -> dict:
 # 5 & 6. fetch_inverter_daily / fetch_weather_daily (tool wrappers)
 # ---------------------------------------------------------------------------
 
-@tool
+class FetchInverterDailySchema(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    start_date: str
+    end_date: str
+    plant_ids: Optional[list[int]] = None
+    block_ids: Optional[list[str]] = None
+    inverter_ids: Optional[list[str]] = None
+
+@tool(args_schema=FetchInverterDailySchema)
 def fetch_inverter_daily_tool(
     start_date: str,
     end_date: str,
     plant_ids: Optional[list[int]] = None,
-    block_ids: Optional[list[int]] = None,
-    inverter_ids: Optional[list[int]] = None,
+    block_ids: Optional[list[str]] = None,
+    inverter_ids: Optional[list[str]] = None,
 ) -> dict:
     """
     Fetches daily inverter telemetry joined with weather and hierarchy data.
@@ -612,16 +638,17 @@ def fetch_inverter_daily_tool(
     Args:
         start_date:   ISO date string "YYYY-MM-DD"
         end_date:     ISO date string "YYYY-MM-DD"
-        plant_ids:    Optional list of plant_id integers to filter
-        block_ids:    Optional list of block_id integers to filter
-        inverter_ids: Optional list of inverter_id integers to filter
+        plant_ids:    List of plant_id integers to filter (REQUIRED unless you want all plants).
+                      Omitting this returns ALL plants — only do this for cross-plant queries.
+        block_ids:    Optional list of block_id strings (e.g. ['1', '2'])
+        inverter_ids: Optional list of inverter_id strings (e.g. ['P1_Block_A_INV_01'])
 
     Returns a dict with:
-        "data_ref": str   — in-memory key to retrieve the DataFrame from DataStore
+        "data_ref": str           — in-memory key to retrieve the DataFrame from DataStore
         "shape":    [rows, cols]
-        "columns":  [...]
-        "sample":   first 3 rows as list of dicts (for LLM inspection)
+        "distinct_plant_ids": [...] — actual plant_ids in the result (scope verification)
         "date_range": {"min": ..., "max": ...}
+        "warnings": [...]         — scope warnings if result is empty or scope mismatch
     """
     from solar_agent.graph.data_store import DataStore  # avoid circular at module load
 
@@ -635,7 +662,29 @@ def fetch_inverter_daily_tool(
         inverter_ids=inverter_ids,
     )
 
+    # Scope guard: warn on empty result or unexpected plant_ids
+    warnings: list[str] = []
+    if df.empty:
+        warnings.append(
+            f"fetch_inverter_daily returned 0 rows for the given filters "
+            f"(plant_ids={plant_ids}, dates={start_date} to {end_date}). "
+            "Check that the plant IDs and date range are correct."
+        )
+    else:
+        actual_plants = sorted(df["plant_id"].unique().tolist())
+        if plant_ids and set(actual_plants) != set(plant_ids):
+            warnings.append(
+                f"Scope mismatch: requested plant_ids={plant_ids} but result contains "
+                f"plant_ids={actual_plants}. Results may cover more or fewer plants than intended."
+            )
+        if plant_ids is None:
+            warnings.append(
+                f"No plant_ids filter applied — result covers ALL plants: {actual_plants}. "
+                "Pass plant_ids=[...] to scope to a specific plant."
+            )
+
     ref = DataStore.store(df)
+    distinct_plants = sorted(df["plant_id"].unique().tolist()) if not df.empty else []
     return {
         "data_ref": ref,
         "shape": list(df.shape),
@@ -645,11 +694,19 @@ def fetch_inverter_daily_tool(
             "min": str(df["log_date"].min()) if not df.empty else None,
             "max": str(df["log_date"].max()) if not df.empty else None,
         },
+        "distinct_plant_ids": distinct_plants,
         "empty": df.empty,
+        "warnings": warnings,
     }
 
 
-@tool
+class FetchWeatherDailySchema(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    start_date: str
+    end_date: str
+    plant_ids: Optional[list[int]] = None
+
+@tool(args_schema=FetchWeatherDailySchema)
 def fetch_weather_daily_tool(
     start_date: str,
     end_date: str,

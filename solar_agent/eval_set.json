@@ -1,0 +1,443 @@
+[
+  {
+    "id": "q01",
+    "question": "Which plant had the highest total yield in September 2026?",
+    "intent": "compare performance across plants",
+    "tasks": [
+      "data_fetch",
+      "compute_kpis",
+      "rank_entities"
+    ],
+    "tools": [
+      "fetch_inverter_daily_tool",
+      "compute_kpis_tool",
+      "rank_entities_tool"
+    ],
+    "key_numbers": [
+      4687593.3
+    ],
+    "notes": "Plant 5 has the highest yield. SQL: SUM(yield) per plant_id."
+  },
+  {
+    "id": "q02",
+    "question": "What was the PR of Plant 1 in September 2026?",
+    "intent": "fetch and compute PR for a single plant",
+    "tasks": [
+      "data_fetch",
+      "compute_kpis"
+    ],
+    "tools": [
+      "fetch_inverter_daily_tool",
+      "compute_kpis_tool"
+    ],
+    "key_numbers": [
+      0.8656,
+      2351535.09
+    ],
+    "notes": "PR=0.8656, yield=2,351,535 kWh. SQL: SUM(yield)/SUM(rated_dc_kw*H), H>0.5."
+  },
+  {
+    "id": "q03",
+    "question": "Did any inverters in Plant 1 have zero generation days in September 2026?",
+    "intent": "fault detection",
+    "tasks": [
+      "data_fetch",
+      "detect_zero_generation"
+    ],
+    "tools": [
+      "fetch_inverter_daily_tool",
+      "detect_zero_generation_tool"
+    ],
+    "key_numbers": [
+      1
+    ],
+    "notes": "Exactly 1 inverter-day with zero yield when irradiance > 0.5."
+  },
+  {
+    "id": "q04",
+    "question": "Which inverters in Plant 2 underperformed their block peers in September 2026?",
+    "intent": "fault detection",
+    "tasks": [
+      "data_fetch",
+      "detect_peer_underperformance"
+    ],
+    "tools": [
+      "fetch_inverter_daily_tool",
+      "detect_peer_underperformance_tool"
+    ],
+    "key_numbers": [],
+    "notes": "Qualitative; no specific number required."
+  },
+  {
+    "id": "q05",
+    "question": "How much energy was lost to soiling at Plant 1 in September 2026?",
+    "intent": "environment analysis",
+    "tasks": [
+      "data_fetch",
+      "estimate_soiling_loss"
+    ],
+    "tools": [
+      "fetch_inverter_daily_tool",
+      "estimate_soiling_loss_tool"
+    ],
+    "key_numbers": [
+      89771.84
+    ],
+    "notes": "89,771.84 kWh. SQL: SUM(yield * (1/soiling_ratio - 1)) where soiling_ratio in (0,1] and H>0.5."
+  },
+  {
+    "id": "q06",
+    "question": "Were there any status faults in Plant 3 in September 2026?",
+    "intent": "fault detection",
+    "tasks": [
+      "data_fetch",
+      "detect_status_faults"
+    ],
+    "tools": [
+      "fetch_inverter_daily_tool",
+      "detect_status_faults_tool"
+    ],
+    "key_numbers": [
+      0
+    ],
+    "notes": "0 fault-code rows in plant 3. Fault codes from status_codes.yaml (is_fault=true: 3,4)."
+  },
+  {
+    "id": "q07",
+    "question": "Compare the PR of all plants in September 2026.",
+    "intent": "compare performance across plants",
+    "tasks": [
+      "data_fetch",
+      "compute_kpis",
+      "compare_periods"
+    ],
+    "tools": [
+      "fetch_inverter_daily_tool",
+      "compute_kpis_tool"
+    ],
+    "key_numbers": [
+      0.8656,
+      0.8709,
+      0.7849,
+      0.8693,
+      0.8586
+    ],
+    "notes": "Plant PRs: P1=0.8656, P2=0.8709, P3=0.7849, P4=0.8693, P5=0.8586."
+  },
+  {
+    "id": "q08",
+    "question": "How much energy was lost to soiling at Plant 2 in September 2026?",
+    "intent": "environment analysis",
+    "tasks": [
+      "data_fetch",
+      "estimate_soiling_loss"
+    ],
+    "tools": [
+      "fetch_inverter_daily_tool",
+      "estimate_soiling_loss_tool"
+    ],
+    "key_numbers": [
+      126367.84
+    ],
+    "notes": "126,367.84 kWh. SQL formula: yield*(1/soiling_ratio-1)."
+  },
+  {
+    "id": "q09",
+    "question": "Which block in Plant 2 performed best in September 2026?",
+    "intent": "performance ranking within plant",
+    "tasks": [
+      "data_fetch",
+      "compute_kpis",
+      "rank_entities"
+    ],
+    "tools": [
+      "fetch_inverter_daily_tool",
+      "compute_kpis_tool",
+      "rank_entities_tool"
+    ],
+    "key_numbers": [
+      0.8722
+    ],
+    "notes": "Top block PR = 0.8722. SQL: block-level SUM(yield)/SUM(dc_kw*H)."
+  },
+  {
+    "id": "q10",
+    "question": "How does ambient temperature affect Plant 1 performance ratio?",
+    "intent": "environment analysis",
+    "tasks": [
+      "data_fetch",
+      "weather_correlation"
+    ],
+    "tools": [
+      "fetch_inverter_daily_tool",
+      "analyze_weather_correlation_tool"
+    ],
+    "key_numbers": [],
+    "notes": "Qualitative / R2 value; exact number depends on regression result."
+  },
+  {
+    "id": "q11",
+    "question": "What is the soiling loss in kWh for Plant 3 in September 2026?",
+    "intent": "environment analysis",
+    "tasks": [
+      "data_fetch",
+      "estimate_soiling_loss"
+    ],
+    "tools": [
+      "fetch_inverter_daily_tool",
+      "estimate_soiling_loss_tool"
+    ],
+    "key_numbers": [
+      210466.31
+    ],
+    "notes": "210,466.31 kWh. SQL: SUM(yield*(1/soiling_ratio-1)) plant_id=3."
+  },
+  {
+    "id": "q12",
+    "question": "Which plant had the worst PR in September 2026?",
+    "intent": "compare performance across plants",
+    "tasks": [
+      "data_fetch",
+      "compute_kpis",
+      "rank_entities"
+    ],
+    "tools": [
+      "fetch_inverter_daily_tool",
+      "compute_kpis_tool",
+      "rank_entities_tool"
+    ],
+    "key_numbers": [
+      0.7849
+    ],
+    "notes": "Plant 3 has the worst PR = 0.7849."
+  },
+  {
+    "id": "q13",
+    "question": "How many fault days were recorded in Plant 2 in September 2026?",
+    "intent": "fault detection",
+    "tasks": [
+      "data_fetch",
+      "detect_status_faults"
+    ],
+    "tools": [
+      "fetch_inverter_daily_tool",
+      "detect_status_faults_tool"
+    ],
+    "key_numbers": [
+      1
+    ],
+    "notes": "1 inverter-day with fault code (code=3). SQL: COUNT where code IN fault_codes."
+  },
+  {
+    "id": "q14",
+    "question": "Which block in Plant 2 performed worst in September 2026?",
+    "intent": "performance ranking within plant",
+    "tasks": [
+      "data_fetch",
+      "compute_kpis",
+      "rank_entities"
+    ],
+    "tools": [
+      "fetch_inverter_daily_tool",
+      "compute_kpis_tool",
+      "rank_entities_tool"
+    ],
+    "key_numbers": [
+      0.8655
+    ],
+    "notes": "Worst block PR = 0.8655. SQL: block-level PR ascending order LIMIT 1."
+  },
+  {
+    "id": "q15",
+    "question": "What percentage of Plant 1 energy was lost to soiling in September 2026?",
+    "intent": "environment analysis",
+    "tasks": [
+      "data_fetch",
+      "estimate_soiling_loss"
+    ],
+    "tools": [
+      "fetch_inverter_daily_tool",
+      "estimate_soiling_loss_tool"
+    ],
+    "key_numbers": [
+      3.82
+    ],
+    "notes": "3.82% loss. SQL: SUM(yield*(1/sr-1))/SUM(yield)*100 for plant 1."
+  },
+  {
+    "id": "q16",
+    "question": "Are there any statistical anomalies in inverter output for Plant 1?",
+    "intent": "fault detection",
+    "tasks": [
+      "data_fetch",
+      "detect_anomalies"
+    ],
+    "tools": [
+      "fetch_inverter_daily_tool",
+      "detect_anomalies_tool"
+    ],
+    "key_numbers": [],
+    "notes": "Qualitative; counts anomalous inverter-days via rolling z-score."
+  },
+  {
+    "id": "q17",
+    "question": "What is the total yield across all plants in September 2026?",
+    "intent": "aggregate yield",
+    "tasks": [
+      "data_fetch",
+      "compute_kpis"
+    ],
+    "tools": [
+      "fetch_inverter_daily_tool",
+      "compute_kpis_tool"
+    ],
+    "key_numbers": [
+      20101316.78
+    ],
+    "notes": "Sum of all plant yields in September. Approximately 20.1 GWh."
+  },
+  {
+    "id": "q18",
+    "question": "Which plant had the highest PR in September 2026?",
+    "intent": "compare performance across plants",
+    "tasks": [
+      "data_fetch",
+      "compute_kpis",
+      "rank_entities"
+    ],
+    "tools": [
+      "fetch_inverter_daily_tool",
+      "compute_kpis_tool",
+      "rank_entities_tool"
+    ],
+    "key_numbers": [
+      0.8709
+    ],
+    "notes": "Plant 2 had the highest PR = 0.8709."
+  },
+  {
+    "id": "q19",
+    "question": "Did Plant 3 have any fault events in September 2026?",
+    "intent": "fault detection",
+    "tasks": [
+      "data_fetch",
+      "detect_status_faults"
+    ],
+    "tools": [
+      "fetch_inverter_daily_tool",
+      "detect_status_faults_tool"
+    ],
+    "key_numbers": [
+      0
+    ],
+    "notes": "No faults in plant 3. Warning code (2) is not a fault."
+  },
+  {
+    "id": "q20",
+    "question": "Compare soiling losses across Plant 1, Plant 2, and Plant 3 in September 2026.",
+    "intent": "environment analysis",
+    "tasks": [
+      "data_fetch",
+      "estimate_soiling_loss"
+    ],
+    "tools": [
+      "fetch_inverter_daily_tool",
+      "estimate_soiling_loss_tool"
+    ],
+    "key_numbers": [
+      89771.84,
+      126367.84,
+      210466.31
+    ],
+    "notes": "Plant 1: 89.8k kWh, Plant 2: 126.4k kWh, Plant 3: 210.5k kWh."
+  },
+  {
+    "id": "q21",
+    "question": "What is the expected yield for Plant 1 in September 2026?",
+    "intent": "fetch and compute PR for a single plant",
+    "tasks": [
+      "data_fetch",
+      "compute_kpis"
+    ],
+    "tools": [
+      "fetch_inverter_daily_tool",
+      "compute_kpis_tool"
+    ],
+    "key_numbers": [
+      2717079.64
+    ],
+    "notes": "Expected yield = SUM(rated_dc_kw * H). Denominator of PR formula."
+  },
+  {
+    "id": "q22",
+    "question": "Rank all inverters in Plant 1 by PR in September 2026.",
+    "intent": "performance ranking within plant",
+    "tasks": [
+      "data_fetch",
+      "compute_kpis",
+      "rank_entities"
+    ],
+    "tools": [
+      "fetch_inverter_daily_tool",
+      "compute_kpis_tool",
+      "rank_entities_tool"
+    ],
+    "key_numbers": [],
+    "notes": "Ranked list; no single key number, correctness checked via grounding."
+  },
+  {
+    "id": "q23",
+    "question": "How does the soiling ratio affect Plant 2 yield in September 2026?",
+    "intent": "environment analysis",
+    "tasks": [
+      "data_fetch",
+      "estimate_soiling_loss"
+    ],
+    "tools": [
+      "fetch_inverter_daily_tool",
+      "estimate_soiling_loss_tool"
+    ],
+    "key_numbers": [
+      126367.84
+    ],
+    "notes": "Soiling caused 126,367.84 kWh loss (\u00e2\u2030\u02c63.2% of yield)."
+  },
+  {
+    "id": "q24",
+    "question": "Which blocks in Plant 1 had below-average PR in September 2026?",
+    "intent": "performance ranking within plant",
+    "tasks": [
+      "data_fetch",
+      "compute_kpis",
+      "rank_entities"
+    ],
+    "tools": [
+      "fetch_inverter_daily_tool",
+      "compute_kpis_tool",
+      "rank_entities_tool"
+    ],
+    "key_numbers": [
+      0.856265
+    ],
+    "notes": "Block 1 (PR=0.8563) is below the plant average (0.8656)."
+  },
+  {
+    "id": "q25",
+    "question": "What would the yield of Plant 1 be without soiling losses in September 2026?",
+    "intent": "environment analysis",
+    "tasks": [
+      "data_fetch",
+      "estimate_soiling_loss"
+    ],
+    "tools": [
+      "fetch_inverter_daily_tool",
+      "estimate_soiling_loss_tool"
+    ],
+    "key_numbers": [
+      89771.84,
+      2351535.09,
+      2441306.93
+    ],
+    "notes": "Clean yield = actual + soiling_loss = 2,351,535 + 89,772 = 2,441,307 kWh."
+  }
+]
