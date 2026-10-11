@@ -203,12 +203,16 @@ def ingest_single_day(log_date_str, inverter_data_list, weather_data_list):
     cur.close()
     conn.close()
 
-def generate_data(inverter_records):
+def generate_data(inverter_records, start_date=None, end_date=None):
     # --------------------------------------------------------------------------------
-    # 3. 15-DAY DAILY DATA GENERATION LOGIC WITH INJECTED ANOMALIES
+    # 3. DAILY DATA GENERATION LOGIC WITH INJECTED ANOMALIES (1st Aug to 26th Sep)
     # --------------------------------------------------------------------------------
-    start_date = datetime(2026, 9, 12).date()
-    days = 15
+    if start_date is None:
+        start_date = datetime(2026, 8, 1).date()
+    if end_date is None:
+        end_date = datetime(2026, 9, 26).date()
+        
+    days = (end_date - start_date).days + 1
     
     # Pre-organize inverters by plant
     inverters_by_plant = {i: [] for i in range(1, 6)}
@@ -217,7 +221,6 @@ def generate_data(inverter_records):
         
     for day_offset in range(days):
         current_date = start_date + timedelta(days=day_offset)
-        day_num = day_offset + 1
         
         daily_weather = []
         daily_inverters = []
@@ -231,13 +234,20 @@ def generate_data(inverter_records):
             soiling = random.uniform(0.95, 0.98)
             
             # --- WEATHER ANOMALIES ---
-            # 3. Thermal Efficiency Loss (Day 12, Plant 5)
-            if day_num == 12 and plant_id == 5:
+            # 3. Thermal Efficiency Loss (2026-09-23, Plant 5)
+            if current_date == datetime(2026, 9, 23).date() and plant_id == 5:
                 max_mod_temp = 64.0
             
-            # 4. Dust Accumulation Loss (Days 8-15, Plant 3)
-            if day_num >= 8 and plant_id == 3:
+            # 4. Dust Accumulation Loss (2026-09-19 to 2026-09-26, Plant 3)
+            if current_date >= datetime(2026, 9, 19).date() and plant_id == 3:
                 soiling = 0.78
+                
+            # 5. August Dust Accumulation & Cleaning Event (Plant 4)
+            if current_date.month == 8 and plant_id == 4:
+                if 5 <= current_date.day <= 14:
+                    soiling = 0.95 - (current_date.day - 5) * 0.01
+                elif current_date.day == 15:
+                    soiling = 0.98
                 
             daily_weather.append((
                 current_date,
@@ -264,10 +274,8 @@ def generate_data(inverter_records):
                 pr = efficiency * soiling * temp_derating
                 
                 # Apply Anomaly 3 Impact: 15% drop due to heat degradation
-                if day_num == 12 and plant_id == 5:
+                if current_date == datetime(2026, 9, 23).date() and plant_id == 5:
                     pr *= 0.85
-                
-                # (Anomaly 4 Dust Accumulation is already handled by soiling=0.78 above)
                 
                 yield_kwh = rated_ac * total_rad * pr
                 
@@ -278,16 +286,16 @@ def generate_data(inverter_records):
                 avg_current = (peak_dc * 1000) / avg_voltage if avg_voltage > 0 else 0
                 
                 # --- SPECIFIC INVERTER ANOMALIES ---
-                # 1. Complete Inverter Trip (Day 5, Plant 1, P1_Block_A_INV_02)
-                if day_num == 5 and plant_id == 1 and inv_id == "P1_Block_A_INV_02":
+                # 1. Complete Inverter Trip (2026-09-16, Plant 1, P1_Block_A_INV_02)
+                if current_date == datetime(2026, 9, 16).date() and plant_id == 1 and inv_id == "P1_Block_A_INV_02":
                     peak_dc = 0.0
                     peak_ac = 0.0
                     yield_kwh = 0.0
                     avg_current = 0.0
                     status_code = 2
                     
-                # 2. Localized Shading / String Loss (Day 10, Plant 2, P2_Block_B_INV_04)
-                if day_num == 10 and plant_id == 2 and inv_id == "P2_Block_B_INV_04":
+                # 2. Localized Shading / String Loss (2026-09-21, Plant 2, P2_Block_B_INV_04)
+                if current_date == datetime(2026, 9, 21).date() and plant_id == 2 and inv_id == "P2_Block_B_INV_04":
                     yield_kwh *= 0.35
                     peak_dc *= 0.35
                     peak_ac *= 0.35
@@ -378,7 +386,7 @@ if __name__ == "__main__":
     try:
         create_schema()
         inverters = seed_hierarchy()
-        print("\nGenerating 15 Days of Data...")
+        print("\nGenerating Data from 1st August to 26th September (57 Days)...")
         generate_data(inverters)
         run_tests()
         print("\nData generation complete!")
