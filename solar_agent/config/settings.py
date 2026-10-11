@@ -35,7 +35,7 @@ class Settings(BaseSettings):
 
     # --- Database ---
     database_url: str = Field(
-        default="postgresql+psycopg://solar_ro:password@localhost:5432/solar_db",
+        default="postgresql+psycopg://solar_ro:password@localhost:5432/solardata",
         description="Read-only PostgreSQL connection string (psycopg v3 driver).",
     )
 

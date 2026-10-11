@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 # DATABASE CREDENTIALS (UPDATE THESE IF NEEDED)
 # --------------------------------------------------------------------------------
 DB_HOST = "localhost"
-DB_NAME = "postgres"  # Change to your specific database if you have one created
+DB_NAME = "solardata"
 DB_USER = "postgres"
 DB_PASS = "123456789"  # Update with your local postgres password
 DB_PORT = "5432"
