@@ -28,6 +28,7 @@ from solar_agent.agents.environment_agent import EnvironmentAgent
 from solar_agent.agents.fault_agent import FaultAgent
 from solar_agent.agents.performance_agent import PerformanceAgent
 from solar_agent.config.settings import settings
+from solar_agent.graph.data_store import DataStore
 from solar_agent.state import AgentState, Plan, Task, TaskResult, TaskStatus, BudgetExceeded
 
 logger = logging.getLogger(__name__)
@@ -100,6 +101,27 @@ def _resolve_refs(inputs: dict[str, Any], results: dict[str, TaskResult]) -> dic
 # Executor
 # ---------------------------------------------------------------------------
 
+class ChartAgent:
+    """Deterministic agent that creates Plotly charts without LLM calls."""
+    name = "chart"
+
+    def run(self, task_id: str, description: str, inputs: dict[str, Any], run_id: str = "__default__") -> TaskResult:
+        from solar_agent.tools.charts import make_chart
+        data_ref = inputs.get("data_ref")
+        kind = inputs.get("kind")
+        if not kind:
+            kind = "line" if "trend" in description.lower() else "bar"
+        chart_json = make_chart(data_ref=data_ref, kind=kind)
+        return TaskResult(
+            task_id=task_id,
+            status=TaskStatus.DONE,
+            summary=f"Generated {kind} chart for {data_ref}.",
+            data_ref=data_ref,
+            metrics={"chart_json": chart_json, "chart_kind": kind},
+            tool_calls_made=["make_chart"],
+        )
+
+
 class Executor:
     """
     LangGraph node that dispatches one topological layer of tasks at a time.
@@ -113,6 +135,7 @@ class Executor:
             "performance": PerformanceAgent(llm=llm),
             "fault": FaultAgent(llm=llm),
             "environment": EnvironmentAgent(llm=llm),
+            "chart": ChartAgent(),
         }
 
     # ------------------------------------------------------------------
@@ -145,7 +168,13 @@ class Executor:
         try:
             new_results = self._run_layer(layer_tasks, results, run_id=run_id)
             results.update(new_results)
-            return {"results": results}
+            warnings_list = list(state.get("warnings") or [])
+            for tr in new_results.values():
+                if hasattr(tr, "warnings") and tr.warnings:
+                    for w in tr.warnings:
+                        if w not in warnings_list:
+                            warnings_list.append(w)
+            return {"results": results, "warnings": warnings_list}
         except BudgetExceeded as exc:
             # The exception might have partial results attached from _run_layer
             if hasattr(exc, "partial_results"):
@@ -198,6 +227,37 @@ class Executor:
                     continue
 
                 inputs = _resolve_refs(task.inputs, results)
+
+                # Validate data_ref for analysis tasks
+                if task.agent in ("performance", "fault", "environment"):
+                    task_data_ref = inputs.get("data_ref")
+                    if task_data_ref:
+                        valid_dep_refs = {
+                            results[dep].data_ref
+                            for dep in task.depends_on
+                            if results.get(dep) and results[dep].data_ref
+                        }
+                        if task_data_ref not in valid_dep_refs:
+                            new_results[task.id] = TaskResult(
+                                task_id=task.id,
+                                status=TaskStatus.FAILED,
+                                error=(
+                                    f"Task '{task.id}' attempted to use data_ref '{task_data_ref}' "
+                                    f"not produced by any of its declared dependencies {task.depends_on}."
+                                ),
+                            )
+                            continue
+
+                        df = DataStore.get_or_load(task_data_ref)
+                        if df is None or df.empty:
+                            new_results[task.id] = TaskResult(
+                                task_id=task.id,
+                                status=TaskStatus.FAILED,
+                                error=f"Analysis task '{task.id}' cannot run on an empty DataFrame (data_ref='{task_data_ref}').",
+                                warnings=[f"Analysis task '{task.id}' skipped execution on empty frame."],
+                            )
+                            continue
+
                 agent = self._agents.get(task.agent)
                 if agent is None:
                     new_results[task.id] = TaskResult(

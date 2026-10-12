@@ -21,12 +21,51 @@ import logging
 from datetime import date, timedelta
 from typing import Any
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from pydantic import ValidationError
 
-from solar_agent.state import AgentState, IntentType, Plan, Scope, Task, TaskStatus
+from solar_agent.state import AgentState, BudgetExceeded, IntentType, Plan, Scope, Task, TaskStatus
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _extract_json_plan(response: Any) -> dict:
+    """Extract and parse a JSON plan dict from an LLM response (supports tool_calls or content)."""
+    if hasattr(response, "tool_calls") and response.tool_calls:
+        tc = response.tool_calls[0]
+        args = tc.get("args")
+        if isinstance(args, dict):
+            return args
+        if isinstance(args, str):
+            try:
+                return json.loads(args)
+            except Exception:
+                pass
+
+    raw = getattr(response, "content", "")
+    if isinstance(raw, list):
+        raw = "".join(b.get("text", "") if isinstance(b, dict) else str(b) for b in raw)
+    raw = str(raw).strip()
+
+    if "```" in raw:
+        parts = raw.split("```")
+        if len(parts) >= 2:
+            raw = parts[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+            raw = raw.strip()
+
+    try:
+        return json.loads(raw)
+    except Exception:
+        start = raw.find("{")
+        end = raw.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            return json.loads(raw[start:end+1])
+        raise
 
 # ---------------------------------------------------------------------------
 # System prompt
@@ -51,6 +90,8 @@ RULES:
 6. If the query is out-of-scope (e.g. weather forecasting, financial modelling, topics
    unrelated to solar plant operations), return {"out_of_scope": true, "reason": "..."}.
 7. NEVER include numeric calculations, formulas, or data values in the plan.
+8. At most one task per agent unless the tools differ; no duplicate fault tasks. NEVER include a second task for the same agent to 'synthesize', 'correlate', or 'explain' findings—the Synthesizer node handles final explanations automatically.
+9. For multi-plant queries or comparisons across all plants, set all_plants=true (and plant_ids=[]).
 
 INTENT TYPES: performance_ranking, fault_diagnosis, comparison, trend, environmental_impact,
               root_cause, summary, out_of_scope.
@@ -63,7 +104,8 @@ OUTPUT FORMAT (JSON only, no markdown code fences):
     "block_ids": [],
     "inverter_ids": [],
     "start_date": "YYYY-MM-DD",
-    "end_date": "YYYY-MM-DD"
+    "end_date": "YYYY-MM-DD",
+    "all_plants": false
   },
   "tasks": [
     {
@@ -95,15 +137,187 @@ _OUT_OF_SCOPE_TOPICS = [
 # ---------------------------------------------------------------------------
 
 def _default_scope() -> dict:
-    """Fallback scope when the LLM omits it: last available 30 days."""
-    today = date.today()
+    """Fallback scope when the LLM omits it: last available 30 days from DB."""
+    try:
+        from solar_agent.db import queries as q
+        today = q.get_max_log_date()
+    except Exception:
+        today = date.today()
     return {
         "plant_ids": [],
         "block_ids": [],
         "inverter_ids": [],
-        "start_date": (today - timedelta(days=30)).isoformat(),
+        "start_date": (today - timedelta(days=29)).isoformat(),
         "end_date": today.isoformat(),
     }
+
+
+def _normalize_scope_and_tasks(payload: dict, query: str, prev_scope: dict | None = None) -> None:
+    """
+    Normalize planner scope in code:
+    - plant name or id to integer plant_ids
+    - dates through resolve_date_range, clamped to data range
+    - inherit plant_ids and dates from prev_scope for follow-up queries
+    - enforce at most one task per agent unless tools differ (no duplicate fault tasks)
+    - sync t1 inputs with normalized scope
+    """
+    import re
+    from solar_agent.db import queries as q
+    from solar_agent.tools.data_tools import resolve_date_range
+
+    min_db = q.get_min_log_date()
+    max_db = q.get_max_log_date()
+
+    scope = payload.get("scope") or {}
+
+    # 1. Normalize Plant IDs
+    raw_plants = scope.get("plant_ids") or []
+    plant_ids: list[int] = []
+
+    q_match = re.findall(r"\bplant\s*(\d+)\b", query, re.IGNORECASE)
+    if q_match:
+        for m in q_match:
+            try:
+                pid = int(m)
+                if pid not in plant_ids:
+                    plant_ids.append(pid)
+            except ValueError:
+                pass
+
+    for p in raw_plants:
+        if isinstance(p, int):
+            if p not in plant_ids:
+                plant_ids.append(p)
+        elif isinstance(p, str):
+            digits = re.findall(r"\d+", p)
+            if digits:
+                pid = int(digits[0])
+                if pid not in plant_ids:
+                    plant_ids.append(pid)
+
+    all_plants = bool(
+        scope.get("all_plants")
+        or (("between plants" in query.lower() or "all plants" in query.lower() or "across plants" in query.lower() or ("compare" in query.lower() and "plant" in query.lower())) and not q_match)
+    )
+    if all_plants and not q_match:
+        plant_ids = []
+
+    # Inherit plant_ids from previous query scope if not provided in follow-up
+    if not plant_ids and not all_plants and prev_scope and prev_scope.get("plant_ids"):
+        plant_ids = list(prev_scope.get("plant_ids"))
+
+    # Extract block_ids if mentioned in query
+    block_ids = scope.get("block_ids") or []
+    stopwords = {"peers", "level", "average", "avg", "inverter", "inverters", "data", "summary", "daily", "trend", "status", "fault", "faults", "peer", "in", "the", "underperformed"}
+    clean_blocks = []
+    for b in block_ids:
+        if isinstance(b, int) or (isinstance(b, str) and b.lower() not in stopwords):
+            clean_blocks.append(b)
+    block_ids = clean_blocks
+
+    b_match = re.findall(r"\bblock\s+([a-zA-Z0-9])\b", query, re.IGNORECASE)
+    if b_match:
+        for b in b_match:
+            b_val = f"Block {b.upper()}"
+            if b_val not in block_ids:
+                block_ids.append(b_val)
+
+    # 2. Normalize and clamp date range
+    resolved_dates = None
+    try:
+        resolved = resolve_date_range.invoke({"text": query})
+        if resolved and "start_date" in resolved and "end_date" in resolved:
+            if "Could not parse" not in resolved.get("assumption", ""):
+                resolved_dates = (
+                    date.fromisoformat(resolved["start_date"]),
+                    date.fromisoformat(resolved["end_date"]),
+                )
+    except Exception:
+        pass
+
+    is_undated = (resolved_dates is None)
+    if resolved_dates:
+        start_d, end_d = resolved_dates
+    elif prev_scope and prev_scope.get("start_date") and prev_scope.get("end_date"):
+        # Inherit date range from previous scope
+        p_start = prev_scope["start_date"]
+        p_end = prev_scope["end_date"]
+        start_d = date.fromisoformat(p_start) if isinstance(p_start, str) else p_start
+        end_d = date.fromisoformat(p_end) if isinstance(p_end, str) else p_end
+        is_undated = False
+    else:
+        end_d = max_db
+        start_d = max(min_db, max_db - timedelta(days=29))
+
+    # Clamp to actual DB bounds [min_db, max_db]
+    if start_d > max_db:
+        span = (end_d - start_d).days
+        end_d = max_db
+        start_d = max(min_db, max_db - timedelta(days=max(14, span)))
+    elif end_d > max_db:
+        end_d = max_db
+
+    if start_d < min_db:
+        start_d = min_db
+    if end_d < min_db:
+        end_d = min_db
+
+    scope["plant_ids"] = plant_ids
+    scope["block_ids"] = block_ids
+    scope["start_date"] = start_d.isoformat()
+    scope["end_date"] = end_d.isoformat()
+    scope["all_plants"] = all_plants
+    payload["scope"] = scope
+
+    assumption_line = f"Data available {min_db.isoformat()} to {max_db.isoformat()}"
+    assumptions = payload.get("assumptions") or []
+    if assumption_line not in assumptions:
+        assumptions.append(assumption_line)
+
+    if is_undated:
+        undated_line = f"Undated query; defaulted to last 30 days of available data ({start_d.isoformat()} to {end_d.isoformat()})"
+        if undated_line not in assumptions:
+            assumptions.append(undated_line)
+
+    payload["assumptions"] = assumptions
+
+    # 3. Synchronize t1 inputs and deduplicate tasks
+    tasks = payload.get("tasks", [])
+    if tasks and isinstance(tasks, list):
+        t1 = tasks[0]
+        if isinstance(t1, dict) and t1.get("agent") == "data":
+            t1_inputs = t1.get("inputs") or {}
+            t1_inputs["plant_ids"] = plant_ids if plant_ids else None
+            t1_inputs["block_ids"] = block_ids if block_ids else None
+            t1_inputs["all_plants"] = all_plants
+            t1_inputs["start_date"] = start_d.isoformat()
+            t1_inputs["end_date"] = end_d.isoformat()
+            t1["inputs"] = t1_inputs
+
+        # Enforce: at most one task per agent unless tools differ; no duplicate fault tasks
+        seen_agents: dict[str, dict] = {}
+        deduped_tasks = []
+        removed_task_ids = set()
+        for t in tasks:
+            agent = t.get("agent")
+            tool_hint = t.get("tool_hint")
+            desc = t.get("description", "").lower()
+            if agent in seen_agents:
+                prev_task = seen_agents[agent]
+                prev_tool_hint = prev_task.get("tool_hint")
+                if agent == "fault" or (tool_hint == prev_tool_hint and not tool_hint) or "synthesize" in desc or "explain" in desc:
+                    removed_task_ids.add(t.get("id"))
+                    logger.info("Deduplicating redundant task %s for agent %s", t.get("id"), agent)
+                    continue
+            seen_agents[agent] = t
+            deduped_tasks.append(t)
+
+        for t in deduped_tasks:
+            deps = t.get("depends_on") or []
+            t["depends_on"] = [d for d in deps if d not in removed_task_ids]
+
+        payload["tasks"] = deduped_tasks
+    return payload
 
 
 def _resolve_input_refs(inputs: dict[str, Any], results: dict) -> dict[str, Any]:
@@ -169,8 +383,25 @@ class Orchestrator:
                 ),
             }
 
+        # Check for previous query scope context on the same thread
+        prev_scope = state.get("previous_scope")
+        if not prev_scope and state.get("plan") and replan_count == 0:
+            try:
+                prev_scope = state["plan"].scope.model_dump()
+            except Exception:
+                prev_scope = None
+
         # Build the human message
         human_parts = [f"User query: {query}"]
+        if prev_scope:
+            prev_p = prev_scope.get("plant_ids") or []
+            prev_s = prev_scope.get("start_date")
+            prev_e = prev_scope.get("end_date")
+            human_parts.append(
+                f"\nContext from previous query on this thread: plant_ids={prev_p}, date_range={prev_s} to {prev_e}. "
+                "If the user query is a follow-up (e.g. 'now show Block B', 'same for Plant 2'), inherit the plant_ids and date range unless overridden."
+            )
+
         if replan_count > 0 and prev_validation:
             issues_text = "\n".join(
                 f"  [{i.severity.upper()}] {i.description} (hint: {i.replan_hint})"
@@ -185,24 +416,31 @@ class Orchestrator:
         human_msg = HumanMessage(content="\n".join(human_parts))
         messages = [SystemMessage(content=_ORCHESTRATOR_SYSTEM_PROMPT), human_msg]
 
+        response = None
         try:
             response = self._llm.invoke(messages, run_id=run_id)
-            raw = response.content.strip()
-
-            # Strip markdown fences if the LLM wraps the JSON
-            if raw.startswith("```"):
-                raw = raw.split("```")[1]
-                if raw.startswith("json"):
-                    raw = raw[4:]
-                raw = raw.strip()
-
-            payload = json.loads(raw)
-        except Exception as exc:
-            logger.error("Orchestrator failed to parse LLM response: %s", exc)
-            return {
-                "is_out_of_scope": True,
-                "final_answer": f"Planning failed: {exc}. Please rephrase your question.",
-            }
+            payload = _extract_json_plan(response)
+        except BudgetExceeded:
+            raise
+        except Exception as first_exc:
+            logger.warning("Orchestrator plan JSON parsing failed (%s). Retrying with reminder...", first_exc)
+            reminder_messages = list(messages) + [
+                AIMessage(content=getattr(response, "content", "") if response is not None else ""),
+                HumanMessage(
+                    content="Your previous response was not valid JSON. Please return valid JSON only, without commentary or markdown code fences."
+                ),
+            ]
+            try:
+                retry_response = self._llm.invoke(reminder_messages, run_id=run_id)
+                payload = _extract_json_plan(retry_response)
+            except BudgetExceeded:
+                raise
+            except Exception as retry_exc:
+                logger.error("Orchestrator plan parsing failed after retry: %s", retry_exc)
+                return {
+                    "is_out_of_scope": True,
+                    "final_answer": f"Planning failed: {retry_exc}. Please rephrase your question.",
+                }
 
         # Handle explicit out-of-scope response
         if payload.get("out_of_scope"):
@@ -210,6 +448,9 @@ class Orchestrator:
                 "is_out_of_scope": True,
                 "final_answer": payload.get("reason", "Query is out of scope."),
             }
+
+        # Normalize scope and tasks in code
+        _normalize_scope_and_tasks(payload, query, prev_scope=prev_scope)
 
         # Build and validate the Plan Pydantic model
         try:
@@ -240,4 +481,6 @@ class Orchestrator:
             "results": {},
             "replan_count": replan_count,
             "is_out_of_scope": False,
+            "assumptions": payload.get("assumptions") or [],
+            "previous_scope": plan.scope.model_dump(),
         }

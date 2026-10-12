@@ -125,7 +125,7 @@ class TestRunIdIsolation:
     def test_thread_safety_concurrent_runs(self):
         """Multiple threads with different run_ids should not corrupt each other."""
         inner = _make_inner_llm()
-        budgeted = BudgetedLLM(inner_llm=inner, budget=100)
+        budgeted = BudgetedLLM(inner_llm=inner, budget=100, max_rpm=0)
         errors = []
 
         def invoke_n(run_id: str, n: int):
@@ -203,6 +203,19 @@ class TestWorstCaseBudget:
             budgeted.invoke("msg", run_id="run-1")
 
         assert "6 calls" in str(exc_info.value) or "budget exceeded" in str(exc_info.value).lower()
+
+    def test_thirteenth_call_blocked_with_budget_twelve(self):
+        """Check the budget before making a call so the 13th call is blocked."""
+        inner = _make_inner_llm()
+        budgeted = BudgetedLLM(inner_llm=inner, budget=12)
+        for _ in range(12):
+            budgeted.invoke("msg", run_id="run-12")
+        assert budgeted.call_count("run-12") == 12
+        with pytest.raises(BudgetExceeded):
+            budgeted.invoke("msg", run_id="run-12")
+        # Verify call was blocked before invoking inner LLM
+        assert inner.invoke.call_count == 12
+
 
     def test_forced_budget_exceeded_returns_partial_answer(self):
         """

@@ -201,7 +201,7 @@ hierarchy:
     - Every inverter belongs to exactly one block and one plant.
     - Every block belongs to exactly one plant.
     - Weather data is at the PLANT level; join via plant_id to get weather for any inverter.
-    - "Block-level" aggregates are always computed by summing/aggregating inverter-level data,
+    - Block-level aggregates are always computed by summing/aggregating inverter-level data,
       never by querying a block telemetry table (which does not exist).
 
 # ---------------------------------------------------------------------------

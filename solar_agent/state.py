@@ -75,10 +75,11 @@ class BudgetExceeded(RuntimeError):
 class Scope(BaseModel):
     """Resolved scope for a user query."""
     plant_ids: list[int] = Field(default_factory=list)
-    block_ids: list[int] = Field(default_factory=list)
-    inverter_ids: list[int] = Field(default_factory=list)
+    block_ids: list[int | str] = Field(default_factory=list)
+    inverter_ids: list[int | str] = Field(default_factory=list)
     start_date: date
     end_date: date
+    all_plants: bool = Field(default=False, description="Set to true when all plants are intentionally queried.")
 
     @field_validator("end_date")
     @classmethod
@@ -104,7 +105,7 @@ class Task(BaseModel):
         description="Unique task identifier within this plan (e.g. 't1', 't2').",
         pattern=r"^t\d+$",
     )
-    agent: Literal["data", "performance", "fault", "environment"] = Field(
+    agent: Literal["data", "performance", "fault", "environment", "chart"] = Field(
         ...,
         description="Which specialist agent executes this task.",
     )
@@ -260,6 +261,10 @@ class TaskResult(BaseModel):
         default_factory=list,
         description="Names of tools called during this task (for observability).",
     )
+    warnings: list[str] = Field(
+        default_factory=list,
+        description="Warnings generated during task execution.",
+    )
     latency_ms: Optional[float] = None
 
 
@@ -327,5 +332,11 @@ class AgentState(TypedDict):
     # Running count of LLM API calls made in this query
     llm_call_count: int
 
+    # Warnings gathered from all tasks executed
+    warnings: list[str]
+
     # Per-invocation unique identifier for budget isolation (set by start_node)
     run_id: Optional[str]
+
+    # Preserved previous scope on this thread for follow-up query inheritance
+    previous_scope: Optional[dict]

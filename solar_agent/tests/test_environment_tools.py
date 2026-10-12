@@ -182,3 +182,31 @@ def test_analyze_weather_correlation_all_nulls():
     
     assert "Not enough data points for Temperature vs PR regression." in res["warnings"]
     assert "Not enough data points for Irradiance vs Yield regression." in res["warnings"]
+
+
+def test_estimate_soiling_loss_two_plants():
+    """Verify estimate_soiling_loss returns per-plant keys and all-plants totals."""
+    df = pd.DataFrame({
+        "log_date": ["2026-09-01", "2026-09-02", "2026-09-01", "2026-09-02"],
+        "plant_id": [1, 1, 2, 2],
+        "inverter_id": ["INV1", "INV1", "INV2", "INV2"],
+        "soiling_ratio": [0.95, 0.95, 0.90, 0.90],
+        "total_daily_yield_kwh": [1000.0, 1000.0, 1000.0, 1000.0]
+    })
+    ref = DataStore.store(df)
+    res = estimate_soiling_loss(ref)
+    metrics = res["metrics"]
+    
+    assert "plant_1_soiling_loss_kwh" in metrics
+    assert "plant_1_soiling_loss_pct" in metrics
+    assert "plant_2_soiling_loss_kwh" in metrics
+    assert "plant_2_soiling_loss_pct" in metrics
+    assert "all_plants_total_soiling_loss_kwh" in metrics
+    assert "all_plants_soiling_loss_pct" in metrics
+    
+    # Plant 1: 2000 * (1/0.95 - 1) = 105.26 kWh, ~5.26%
+    assert abs(metrics["plant_1_soiling_loss_kwh"] - 105.26) < 0.5
+    # Plant 2: 2000 * (1/0.90 - 1) = 222.22 kWh, ~11.11%
+    assert abs(metrics["plant_2_soiling_loss_kwh"] - 222.22) < 0.5
+    assert abs(metrics["all_plants_total_soiling_loss_kwh"] - (105.26 + 222.22)) < 1.0
+

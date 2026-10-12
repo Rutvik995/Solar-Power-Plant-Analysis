@@ -82,9 +82,22 @@ def _partial_answer(state: AgentState, exc: BudgetExceeded) -> dict:
                     lines.append(f"  - {k}: {v}")
     if len(lines) == 1:
         lines.append("  No tasks completed before the budget was exhausted.")
+
+    all_warnings = list(state.get("warnings") or [])
+    for tr in results.values():
+        if hasattr(tr, "warnings") and tr.warnings:
+            for w in tr.warnings:
+                if w not in all_warnings:
+                    all_warnings.append(w)
+    if all_warnings:
+        lines.append("\n## Warnings\n" + "\n".join(f"- {w}" for w in all_warnings))
+    else:
+        lines.append("\n## Warnings\nNone")
+
     return {
         "final_answer": "\n".join(lines),
         "results": results,
+        "warnings": all_warnings,
         "llm_call_count": state.get("llm_call_count", 0),
     }
 
@@ -263,6 +276,7 @@ def initial_state(user_query: str) -> AgentState:
         replan_count=0,
         final_answer=None,
         assumptions=[],
+        warnings=[],
         is_out_of_scope=False,
         llm_call_count=0,
         run_id=None,  # set by start_node at invocation time

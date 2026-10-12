@@ -116,3 +116,126 @@ def test_executor_retry_exception_fail_fast_429():
 
     assert res.status == TaskStatus.FAILED
     assert agent.run.call_count == 1
+
+
+def test_empty_data_stops_chain_and_skips_dependants():
+    """Empty data stops the chain: if t1 fails, dependants are SKIPPED."""
+    executor = _make_executor()
+    task_t1 = Task(id="t1", agent="data", description="Fetch data", depends_on=[])
+    task_t2 = Task(id="t2", agent="performance", description="Compute KPIs", depends_on=["t1"])
+
+    results = {
+        "t1": TaskResult(
+            task_id="t1",
+            status=TaskStatus.FAILED,
+            error="No data found for scope.",
+            warnings=["No data returned (0 rows)."],
+        )
+    }
+
+    # Running layer containing t2
+    new_results = executor._run_layer([task_t2], results)
+    assert new_results["t2"].status == TaskStatus.SKIPPED
+    assert "failed" in (new_results["t2"].error or "")
+
+
+def test_analysis_task_fails_on_empty_frame():
+    """Analysis task may never run on an empty frame."""
+    import pandas as pd
+    from solar_agent.graph.data_store import DataStore
+    executor = _make_executor()
+
+    empty_ref = DataStore.store(pd.DataFrame())
+    task_t2 = Task(
+        id="t2",
+        agent="performance",
+        description="Compute KPIs",
+        inputs={"data_ref": empty_ref},
+        depends_on=["t1"],
+    )
+    results = {
+        "t1": TaskResult(task_id="t1", status=TaskStatus.DONE, data_ref=empty_ref)
+    }
+
+    new_results = executor._run_layer([task_t2], results)
+    assert new_results["t2"].status == TaskStatus.FAILED
+    assert "empty DataFrame" in (new_results["t2"].error or "")
+
+
+def test_analysis_task_only_uses_declared_dependency_data_ref():
+    """Analysis task may only use a data_ref produced by one of its declared dependencies."""
+    import pandas as pd
+    from solar_agent.graph.data_store import DataStore
+    executor = _make_executor()
+
+    valid_ref = DataStore.store(pd.DataFrame({"a": [1, 2]}))
+    # t2 does NOT declare t1 in depends_on
+    task_t2 = Task(
+        id="t2",
+        agent="performance",
+        description="Compute KPIs",
+        inputs={"data_ref": valid_ref},
+        depends_on=[],
+    )
+    results = {
+        "t1": TaskResult(task_id="t1", status=TaskStatus.DONE, data_ref=valid_ref)
+    }
+
+    new_results = executor._run_layer([task_t2], results)
+    assert new_results["t2"].status == TaskStatus.FAILED
+    assert "not produced by any of its declared dependencies" in (new_results["t2"].error or "")
+
+
+def test_warnings_collected_into_state_and_synthesizer_appends_deterministic_section():
+    """Collect every TaskResult.warnings into state and Synthesizer appends deterministic Warnings section."""
+    from solar_agent.state import AgentState, Plan, Scope, IntentType
+    from datetime import date
+    from solar_agent.graph.synthesizer import Synthesizer
+    from unittest.mock import MagicMock
+    from langchain_core.messages import AIMessage
+
+    executor = _make_executor()
+    plan = Plan(
+        intent=IntentType.PERFORMANCE_RANKING,
+        scope=Scope(plant_ids=[1], start_date=date(2026, 9, 1), end_date=date(2026, 9, 26)),
+        tasks=[
+            Task(id="t1", agent="data", description="Fetch daily telemetry data for Plant 1.", depends_on=[]),
+        ],
+        success_criteria="Criteria is long enough to pass validation.",
+    )
+
+    state = AgentState(
+        user_query="What was PR?",
+        messages=[],
+        plan=plan,
+        results={},
+        warnings=[],
+        run_id="test_run",
+    )
+
+    mock_agent = MagicMock()
+    mock_agent.run.return_value = TaskResult(
+        task_id="t1",
+        status=TaskStatus.DONE,
+        warnings=["Sensor calibration warning", "Irradiance high warning"],
+    )
+    executor._agents["data"] = mock_agent
+
+    update = executor.run_next_layer(state)
+    assert "Sensor calibration warning" in update["warnings"]
+    assert "Irradiance high warning" in update["warnings"]
+
+    # Now verify Synthesizer deterministic section
+    mock_llm = MagicMock()
+    mock_llm.invoke.return_value = AIMessage(content="Performance Ratio was 0.8656.")
+    synthesizer = Synthesizer(llm=mock_llm)
+
+    state["results"] = update["results"]
+    state["warnings"] = update["warnings"]
+
+    synth_res = synthesizer.synthesize(state)
+    final_text = synth_res["final_answer"]
+    assert "## Warnings" in final_text
+    assert "- Sensor calibration warning" in final_text
+    assert "- Irradiance high warning" in final_text
+

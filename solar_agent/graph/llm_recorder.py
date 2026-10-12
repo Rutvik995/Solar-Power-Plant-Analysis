@@ -87,12 +87,25 @@ class ReplayLLM:
         return len(self.cache)
 
     def bind_tools(self, tools: list, **kwargs) -> "ReplayLLM":
-        # In replay mode, we just return self because the cached response already has the tool calls.
-        # But we do need to save this signature so fallback works if we switch to record mode.
-        return self
+        bound_fallback = self.fallback_llm.bind_tools(tools, **kwargs) if self.fallback_llm and hasattr(self.fallback_llm, "bind_tools") else self.fallback_llm
+        r = ReplayLLM(
+            fallback_llm=bound_fallback,
+            mode=self.mode,
+            cache_name=self.cache_file.name,
+        )
+        r.cache = self.cache
+        return r
 
     def bind(self, **kwargs) -> "ReplayLLM":
-        return self
+        bound_fallback = self.fallback_llm.bind(**kwargs) if self.fallback_llm and hasattr(self.fallback_llm, "bind") else self.fallback_llm
+        r = ReplayLLM(
+            fallback_llm=bound_fallback,
+            mode=self.mode,
+            cache_name=self.cache_file.name,
+        )
+        r.cache = self.cache
+        return r
+
 
     def invoke(self, messages: list[BaseMessage], **kwargs) -> BaseMessage:
         if self.mode == "passthrough":

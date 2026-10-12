@@ -44,6 +44,11 @@ def compute_kpis(
     # Compute all row-level KPIs first
     df_kpi = m.compute_all_kpis(df)
     
+    if period in ("all", "month", "monthly", "overall"):
+        period = "total"
+    if level not in ("inverter", "block", "plant"):
+        level = "plant"
+
     # Aggregate
     df_agg = m.aggregate_kpis(df_kpi, level=level, period=period)
 
@@ -52,24 +57,26 @@ def compute_kpis(
     
     # Generate a lightweight summary dict for the LLM
     metrics_summary = {}
-    if period == "total" and level == "plant":
-        if not df_agg.empty:
-            if len(df_agg) == 1:
-                row = df_agg.iloc[0]
-                metrics_summary = {
-                    "performance_ratio": round(row.get("performance_ratio", float("nan")), 4),
-                    "total_yield_kwh": round(row.get("total_daily_yield_kwh", 0), 2),
-                    "expected_yield_kwh": round(row.get("expected_yield_kwh", 0), 2),
-                }
-            else:
-                for _, row in df_agg.iterrows():
-                    pid = row.get("plant_id")
-                    if pd.notna(pid):
-                        pid = int(pid)
-                    else:
-                        pid = "unknown"
-                    metrics_summary[f"plant_{pid}_performance_ratio"] = round(row.get("performance_ratio", float("nan")), 4)
-                    metrics_summary[f"plant_{pid}_total_yield_kwh"] = round(row.get("total_daily_yield_kwh", 0), 2)
+    if not df_agg.empty:
+        if len(df_agg) == 1:
+            row = df_agg.iloc[0]
+            metrics_summary = {
+                "performance_ratio": round(float(row.get("performance_ratio", float("nan"))), 4),
+                "total_yield_kwh": round(float(row.get("total_daily_yield_kwh", 0)), 2),
+                "expected_yield_kwh": round(float(row.get("expected_yield_kwh", 0)), 2),
+            }
+        else:
+            for _, row in df_agg.iterrows():
+                pid = row.get("plant_id")
+                if pd.notna(pid):
+                    pid = int(pid)
+                else:
+                    pid = "unknown"
+                metrics_summary[f"plant_{pid}_performance_ratio"] = round(float(row.get("performance_ratio", float("nan"))), 4)
+                metrics_summary[f"plant_{pid}_total_yield_kwh"] = round(float(row.get("total_daily_yield_kwh", 0)), 2)
+            if "performance_ratio" in df_agg.columns:
+                metrics_summary["performance_ratio"] = round(float(df_agg["performance_ratio"].mean()), 4)
+
 
     return {
         "summary": f"Computed {period} KPIs at {level} level.",

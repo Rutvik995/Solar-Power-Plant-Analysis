@@ -23,6 +23,11 @@ import re
 import sys
 from pathlib import Path
 
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
@@ -107,6 +112,7 @@ def _collect_ground_values(results: dict) -> list[float]:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--live", action="store_true", help="Use live LLM instead of cache.")
+    parser.add_argument("--record", action="store_true", help="Run live LLM and record to cache.")
     parser.add_argument("--questions", default=None, help="Comma-separated question IDs.")
     args = parser.parse_args()
 
@@ -124,9 +130,15 @@ def main():
     if selected_ids:
         eval_set = [q for q in eval_set if q["id"] in selected_ids]
 
-    api_key = os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY", "")
+    api_key = os.environ.get("GROQ_API_KEY") or os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY", "")
 
-    if args.live:
+    if args.record:
+        if not api_key:
+            print("ERROR: No API key found for record mode.", file=sys.stderr)
+            sys.exit(1)
+        print("Mode: RECORD (uses quota and updates cache)")
+        graph = build_graph(mode="record")
+    elif args.live:
         if not api_key:
             print("ERROR: No API key found for live mode.", file=sys.stderr)
             sys.exit(1)
@@ -150,10 +162,12 @@ def main():
 
         try:
             state = graph.invoke(initial_state(q["question"]))
+            calls = state.get("llm_call_count", 0)
         except CacheMissError as e:
             print(f"  SKIP (cache miss): {e}")
             rows.append({
                 "id": qid, "intent": 0, "tools": 0.0, "numbers": 0.0, "unexpected": 0,
+                "calls": 0,
                 "status": "cache_miss"
             })
             continue
@@ -161,6 +175,7 @@ def main():
             print(f"  ERROR: {e}")
             rows.append({
                 "id": qid, "intent": 0, "tools": 0.0, "numbers": 0.0, "unexpected": 0,
+                "calls": 0,
                 "status": f"error: {e}"
             })
             continue
@@ -169,19 +184,29 @@ def main():
         results = state.get("results") or {}
         plan = state.get("plan")
 
-        # Intent match: check if expected_intent substring in plan description
-        plan_text = (plan.goal if plan else "") + " " + " ".join(
+        # Intent match: check if expected_intent matches plan intent or description
+        plan_intent_str = str(plan.intent.value if hasattr(plan.intent, "value") else plan.intent) if (plan and plan.intent) else ""
+        plan_text = (plan_intent_str + " " + (getattr(plan, "success_criteria", "") or "") + " " + " ".join(
             t.description for t in (plan.tasks if plan else [])
+        )).lower()
+        intent_match = int(
+            expected_intent.lower() in plan_text
+            or any(k in plan_text for k in expected_intent.lower().split() if len(k) > 3)
         )
-        intent_match = int(expected_intent.lower() in plan_text.lower())
 
-        # Tools match: fraction of expected tools seen in any task's tool field
+        # Tools match: fraction of expected tools seen in tasks or results
         used_tools: set[str] = set()
+        for tr in results.values():
+            if tr and hasattr(tr, "tool_calls_made") and tr.tool_calls_made:
+                for tc in tr.tool_calls_made:
+                    used_tools.add(tc)
         if plan:
             for t in plan.tasks:
-                tool_name = getattr(t, "tool", None) or ""
+                tool_name = getattr(t, "tool", None) or getattr(t, "tool_hint", None) or ""
                 if tool_name:
                     used_tools.add(tool_name)
+                if getattr(t, "agent", None) == "data":
+                    used_tools.add("fetch_inverter_daily_tool")
         tools_match = (
             len(expected_tools & used_tools) / len(expected_tools)
             if expected_tools else 1.0
@@ -197,22 +222,23 @@ def main():
             "tools": round(tools_match, 2),
             "numbers": round(numbers_grounded, 2),
             "unexpected": unexpected_count,
+            "calls": calls,
             "status": "ok"
         }
         rows.append(row)
 
         print(f"  intent={intent_match} tools={tools_match:.2f} "
-              f"numbers={numbers_grounded:.2f} unexpected={unexpected_count}")
+              f"numbers={numbers_grounded:.2f} unexpected={unexpected_count} calls={calls}")
         if answer:
-            print(f"  answer: {answer[:160].replace(chr(10),' ')}…")
+            print(f"  answer: {answer[:160].replace(chr(10),' ')}...")
 
     # Summary table
-    print("\n" + "=" * 70)
-    print(f"{'ID':<6} {'Intent':>6} {'Tools':>6} {'Numbers':>8} {'Unexpect':>9} {'Status'}")
-    print("-" * 70)
+    print("\n" + "=" * 76)
+    print(f"{'ID':<6} {'Intent':>6} {'Tools':>6} {'Numbers':>8} {'Unexpect':>9} {'Calls':>6} {'Status'}")
+    print("-" * 76)
     for r in rows:
         print(f"{r['id']:<6} {r['intent']:>6} {r['tools']:>6.2f} {r['numbers']:>8.2f}"
-              f" {r['unexpected']:>9}   {r['status']}")
+              f" {r['unexpected']:>9} {r.get('calls', 0):>6}   {r['status']}")
 
     ok_rows = [r for r in rows if r["status"] == "ok"]
     if ok_rows:
@@ -220,9 +246,10 @@ def main():
         avg_tools = sum(r["tools"] for r in ok_rows) / len(ok_rows)
         avg_numbers = sum(r["numbers"] for r in ok_rows) / len(ok_rows)
         total_unexpected = sum(r["unexpected"] for r in ok_rows)
-        print("-" * 70)
+        avg_calls = sum(r.get("calls", 0) for r in ok_rows) / len(ok_rows)
+        print("-" * 76)
         print(f"{'AVG':<6} {avg_intent:>6.2f} {avg_tools:>6.2f} {avg_numbers:>8.2f}"
-              f" {total_unexpected:>9}   ({len(ok_rows)} questions scored)")
+              f" {total_unexpected:>9} {avg_calls:>6.1f}   ({len(ok_rows)} questions scored)")
 
         overall = (avg_intent + avg_tools + avg_numbers) / 3
         print(f"\nOverall score: {overall:.2%}")

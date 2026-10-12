@@ -155,6 +155,60 @@ def test_base_agent_iteration_cap():
     assert mock_llm.invoke.call_count <= MAX_ITERATIONS
 
 
+def test_base_agent_last_iteration_calls_raw_unbound_llm():
+    """On the last iteration call the LLM with tools unbound (never tool_choice='none')."""
+    raw_llm = MagicMock()
+    bound_llm = MagicMock()
+    raw_llm.bind_tools.return_value = bound_llm
+
+    # First iterations return tool calls from bound_llm
+    bound_llm.invoke.return_value = _ai_with_tool_call("_dummy_tool", {"data_ref": "x"})
+    # Last iteration from raw_llm returns final answer
+    raw_llm.invoke.return_value = _ai_final("Final answer on last iteration.")
+
+    agent = _ConcreteAgent(llm=raw_llm)
+    agent._call_tool = lambda name, args: {"data_ref": "dr", "metrics": {}, "warnings": []}
+    result = agent.run("t_last", "desc", {})
+
+    assert result.status == TaskStatus.DONE
+    # Verify raw_llm was invoked directly on the final iteration
+    assert raw_llm.invoke.call_count >= 1
+
+
+def test_base_agent_catches_tool_use_failed_and_retries_unbound():
+    """Catch tool_use_failed (400): retry once with tools unbound."""
+    raw_llm = MagicMock()
+    bound_llm = MagicMock()
+    raw_llm.bind_tools.return_value = bound_llm
+
+    bound_llm.invoke.side_effect = Exception("tool_use_failed (400): Failed to call tool")
+    raw_llm.invoke.return_value = _ai_final("Recovered with unbound LLM.")
+
+    agent = _ConcreteAgent(llm=raw_llm)
+    result = agent.run("t_retry", "desc", {})
+
+    assert result.status == TaskStatus.DONE
+    assert result.summary == "Recovered with unbound LLM."
+    assert raw_llm.invoke.call_count == 1
+
+
+def test_base_agent_tool_use_failed_fallback_fails_returns_failed_result():
+    """If tool_use_failed retry with tools unbound also fails, return error TaskResult."""
+    raw_llm = MagicMock()
+    bound_llm = MagicMock()
+    raw_llm.bind_tools.return_value = bound_llm
+
+    bound_llm.invoke.side_effect = Exception("tool_use_failed (400): Failed to call tool")
+    raw_llm.invoke.side_effect = Exception("Unbound fallback failed too")
+
+    agent = _ConcreteAgent(llm=raw_llm)
+    result = agent.run("t_fail", "desc", {})
+
+    assert result.status == TaskStatus.FAILED
+    assert "Tool use failed (400)" in (result.error or "")
+
+
+
 def test_base_agent_unknown_tool_raises_failed():
     """If the LLM calls a tool that doesn't exist, status is FAILED."""
     mock_llm = _build_mock_llm(

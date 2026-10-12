@@ -333,3 +333,46 @@ class TestOutOfScopeIntent:
             success_criteria="Politely decline and explain what the system can answer.",
         )
         assert plan.intent == IntentType.OUT_OF_SCOPE
+
+
+# ---------------------------------------------------------------------------
+# Planner DAG Rules: at most one task per agent unless tools differ, no duplicate fault tasks
+# ---------------------------------------------------------------------------
+
+class TestPlannerDAGRules:
+
+    def test_duplicate_fault_tasks_deduplicated(self):
+        """Planner rule: no duplicate fault tasks in plan."""
+        from solar_agent.graph.orchestrator import _normalize_scope_and_tasks
+        raw = {
+            "intent": "fault_attribution",
+            "scope": {"plant_ids": [1], "start_date": "2026-09-01", "end_date": "2026-09-26"},
+            "tasks": [
+                {"id": "t1", "agent": "data", "description": "Fetch data for Plant 1", "inputs": {}, "depends_on": []},
+                {"id": "t2", "agent": "fault", "description": "Find faulty inverters", "inputs": {"data_ref": "$t1.data_ref"}, "depends_on": ["t1"]},
+                {"id": "t3", "agent": "fault", "description": "Explain faults and synthesize", "inputs": {"data_ref": "$t1.data_ref"}, "depends_on": ["t2"]},
+            ],
+            "success_criteria": "Find faulty inverters and explain root causes.",
+        }
+        normalized = _normalize_scope_and_tasks(raw, "Find faulty inverters in Plant 1")
+        task_agents = [t["agent"] for t in normalized["tasks"]]
+        assert task_agents == ["data", "fault"]
+        assert len(normalized["tasks"]) == 2
+
+    def test_same_agent_allowed_when_tools_differ(self):
+        """At most one task per agent UNLESS tools differ."""
+        from solar_agent.graph.orchestrator import _normalize_scope_and_tasks
+        raw = {
+            "intent": "fault_attribution",
+            "scope": {"plant_ids": [1], "start_date": "2026-09-01", "end_date": "2026-09-26"},
+            "tasks": [
+                {"id": "t1", "agent": "data", "description": "Fetch data", "inputs": {}, "depends_on": []},
+                {"id": "t2", "agent": "performance", "tool_hint": "compute_kpis_tool", "description": "Compute plant KPIs", "inputs": {"data_ref": "$t1.data_ref"}, "depends_on": ["t1"]},
+                {"id": "t3", "agent": "performance", "tool_hint": "rank_entities_tool", "description": "Rank inverter performance", "inputs": {"data_ref": "$t1.data_ref"}, "depends_on": ["t1"]},
+            ],
+            "success_criteria": "Analyze performance with two tools.",
+        }
+        normalized = _normalize_scope_and_tasks(raw, "Analyze performance")
+        assert len(normalized["tasks"]) == 3
+        assert [t["id"] for t in normalized["tasks"]] == ["t1", "t2", "t3"]
+

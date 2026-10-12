@@ -33,7 +33,7 @@ with open(STATUS_CODES_PATH, "r", encoding="utf-8") as f:
     }
 
 
-def detect_zero_generation(data_ref: str) -> dict[str, Any]:
+def detect_zero_generation(data_ref: str, irradiance_threshold_kwh_m2: float = 0.5) -> dict[str, Any]:
     """
     Detects inverters reporting ~0 yield on days with sufficient irradiance.
     Skips rows with status codes explicitly flagged to bypass yield checks (e.g. Standby).
@@ -45,7 +45,8 @@ def detect_zero_generation(data_ref: str) -> dict[str, Any]:
         return {"summary": "No data for zero-generation check.", "warnings": ["Empty/missing data"]}
 
     # Apply irradiance guard (BR-01)
-    mask_h = df["total_solar_radiation_kwh_m2"] > settings.min_irradiance_kwh_m2
+    thresh = irradiance_threshold_kwh_m2 if irradiance_threshold_kwh_m2 is not None else settings.min_irradiance_kwh_m2
+    mask_h = df["total_solar_radiation_kwh_m2"] > thresh
     
     # Exclude specific statuses (like Standby = 1) from zero-generation check
     mask_status = ~df["status_code"].isin(_EXCLUDE_YIELD_CODES)
@@ -167,7 +168,10 @@ def detect_anomalies(
     columns: list[str] = ["performance_ratio", "avg_dc_voltage_v", "avg_dc_current_a"],
     window_days: int = 14,
     z_threshold: float = 3.0,
+    window: int = None,
 ) -> dict[str, Any]:
+    if window is not None:
+        window_days = window
     """
     Detect statistical anomalies (sudden spikes/drops) for a single inverter over time,
     using a rolling z-score.

@@ -20,6 +20,7 @@ from typing import Any
 
 from solar_agent.state import TaskResult, TaskStatus
 from solar_agent.tools.data_tools import (
+    FetchInverterDailySchema,
     fetch_inverter_daily_tool,
     fetch_weather_daily_tool,
 )
@@ -71,6 +72,7 @@ class DataAgent:
             fetch_kwargs: dict[str, Any] = {
                 "start_date": str(start_date),
                 "end_date": str(end_date),
+                "all_plants": bool(inputs.get("all_plants", False)),
             }
             if plant_ids:
                 fetch_kwargs["plant_ids"] = list(plant_ids)
@@ -79,26 +81,52 @@ class DataAgent:
             if inverter_ids:
                 fetch_kwargs["inverter_ids"] = list(inverter_ids)
 
+            # Validate args through strict schema
+            schema_model = FetchInverterDailySchema.model_validate(fetch_kwargs)
+            validated_kwargs = schema_model.model_dump(exclude_none=True)
+
             # --- Fetch inverter telemetry (required) ---
             logger.info(
                 "DataAgent[%s]: fetching inverter data scope=%s %s→%s",
-                task_id, {k: v for k, v in fetch_kwargs.items() if k != "start_date" and k != "end_date"},
+                task_id, {k: v for k, v in validated_kwargs.items() if k != "start_date" and k != "end_date"},
                 start_date, end_date,
             )
-            inv_result = fetch_inverter_daily_tool.invoke(fetch_kwargs)
+            inv_result = fetch_inverter_daily_tool.invoke(validated_kwargs)
             tool_calls_made.append("fetch_inverter_daily_tool")
+
+            warnings = list(inv_result.get("warnings", []))
 
             if "error" in inv_result:
                 return TaskResult(
                     task_id=task_id,
                     status=TaskStatus.FAILED,
                     error=inv_result["error"],
+                    warnings=warnings,
                     tool_calls_made=tool_calls_made,
                 )
 
             data_ref = inv_result.get("data_ref")
-            row_count = inv_result.get("row_count", 0)
-            warnings  = list(inv_result.get("warnings", []))
+            row_count = inv_result.get("row_count")
+            if row_count is None and "shape" in inv_result:
+                row_count = inv_result["shape"][0]
+            row_count = row_count or 0
+
+            # Empty data must stop the chain: mark t1 FAILED with warning
+            if row_count == 0:
+                empty_warn = (
+                    f"fetch_inverter_daily returned 0 rows for filters "
+                    f"(plant_ids={plant_ids}, dates={start_date} to {end_date})."
+                )
+                if empty_warn not in warnings:
+                    warnings.append(empty_warn)
+                return TaskResult(
+                    task_id=task_id,
+                    status=TaskStatus.FAILED,
+                    error="No telemetry data found for the specified scope and date range (0 rows).",
+                    warnings=warnings,
+                    tool_calls_made=tool_calls_made,
+                    latency_ms=(time.monotonic() - t_start) * 1000,
+                )
 
             summary = (
                 f"Fetched {row_count} inverter-days "
@@ -111,6 +139,7 @@ class DataAgent:
                 summary=summary,
                 data_ref=data_ref,
                 metrics={"row_count": row_count},
+                warnings=warnings,
                 tool_calls_made=tool_calls_made,
                 latency_ms=(time.monotonic() - t_start) * 1000,
             )

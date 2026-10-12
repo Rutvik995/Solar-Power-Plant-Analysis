@@ -64,10 +64,24 @@ def _numbers_from_results(results: dict) -> list[float]:
     for tr in results.values():
         if tr and tr.metrics:
             for v in tr.metrics.values():
-                try:
-                    all_nums.append(float(v))
-                except (TypeError, ValueError):
-                    pass
+                if isinstance(v, list):
+                    for item in v:
+                        if isinstance(item, dict):
+                            for sub_v in item.values():
+                                try:
+                                    all_nums.append(float(sub_v))
+                                except (TypeError, ValueError):
+                                    pass
+                        else:
+                            try:
+                                all_nums.append(float(item))
+                            except (TypeError, ValueError):
+                                pass
+                else:
+                    try:
+                        all_nums.append(float(v))
+                    except (TypeError, ValueError):
+                        pass
         if tr and tr.data_ref:
             df = DataStore.get(tr.data_ref)
             if df is not None and not df.empty:

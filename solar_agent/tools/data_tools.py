@@ -301,6 +301,26 @@ def resolve_date_range(text: str) -> dict:
             assumption = f"Explicit date range: {_fmt(start)} to {_fmt(end)}"
             return start, end, assumption
 
+        # --- Month expressions: "September 2026", "aug 2026" ---
+        month_map = {
+            "jan": 1, "january": 1, "feb": 2, "february": 2, "mar": 3, "march": 3,
+            "apr": 4, "april": 4, "may": 5, "jun": 6, "june": 6, "jul": 7, "july": 7,
+            "aug": 8, "august": 8, "sep": 9, "september": 9, "oct": 10, "october": 10,
+            "nov": 11, "november": 11, "dec": 12, "december": 12,
+        }
+        month_match = re.search(
+            r"\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+(\d{4})\b",
+            t,
+        )
+        if month_match:
+            m_name = month_match.group(1).lower()
+            year = int(month_match.group(2))
+            month_num = month_map[m_name]
+            start = date(year, month_num, 1)
+            end = _last_of_month(start)
+            assumption = f"Interpreted '{text}' as {m_name.capitalize()} {year}: {_fmt(start)} to {_fmt(end)}"
+            return start, end, assumption
+
         # --- Quarter expressions: "Q1 2025", "q2 2024" ---
         quarter_match = re.search(r"q([1-4])\s+(\d{4})", t)
         if quarter_match:
@@ -620,6 +640,7 @@ class FetchInverterDailySchema(BaseModel):
     plant_ids: Optional[list[int]] = None
     block_ids: Optional[list[str]] = None
     inverter_ids: Optional[list[str]] = None
+    all_plants: bool = False
 
 @tool(args_schema=FetchInverterDailySchema)
 def fetch_inverter_daily_tool(
@@ -628,6 +649,7 @@ def fetch_inverter_daily_tool(
     plant_ids: Optional[list[int]] = None,
     block_ids: Optional[list[str]] = None,
     inverter_ids: Optional[list[str]] = None,
+    all_plants: bool = False,
 ) -> dict:
     """
     Fetches daily inverter telemetry joined with weather and hierarchy data.
@@ -642,6 +664,7 @@ def fetch_inverter_daily_tool(
                       Omitting this returns ALL plants — only do this for cross-plant queries.
         block_ids:    Optional list of block_id strings (e.g. ['1', '2'])
         inverter_ids: Optional list of inverter_id strings (e.g. ['P1_Block_A_INV_01'])
+        all_plants:   Boolean flag indicating if all plants are intentionally fetched.
 
     Returns a dict with:
         "data_ref": str           — in-memory key to retrieve the DataFrame from DataStore
@@ -677,7 +700,7 @@ def fetch_inverter_daily_tool(
                 f"Scope mismatch: requested plant_ids={plant_ids} but result contains "
                 f"plant_ids={actual_plants}. Results may cover more or fewer plants than intended."
             )
-        if plant_ids is None:
+        if (plant_ids is None or len(plant_ids) == 0) and not all_plants:
             warnings.append(
                 f"No plant_ids filter applied — result covers ALL plants: {actual_plants}. "
                 "Pass plant_ids=[...] to scope to a specific plant."
@@ -687,6 +710,7 @@ def fetch_inverter_daily_tool(
     distinct_plants = sorted(df["plant_id"].unique().tolist()) if not df.empty else []
     return {
         "data_ref": ref,
+        "row_count": len(df),
         "shape": list(df.shape),
         "columns": list(df.columns),
         "sample": df.head(3).to_dict(orient="records"),

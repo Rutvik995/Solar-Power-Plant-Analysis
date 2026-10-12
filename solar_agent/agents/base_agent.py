@@ -47,6 +47,7 @@ class BaseSpecialistAgent:
     def __init__(self, llm):
         if not self.tools:
             raise ValueError(f"Agent '{self.name}' must define at least one tool.")
+        self._raw_llm = llm
         self._llm = llm.bind_tools(self.tools)
         self._tool_map: dict[str, BaseTool] = {t.name: t for t in self.tools}
 
@@ -61,11 +62,45 @@ class BaseSpecialistAgent:
         ]
 
         try:
+            flagged_items: list[dict] = []
+            anomaly_sentence: str = "Anomalies found: none."
             for _iteration in range(MAX_ITERATIONS):
-                response: AIMessage = self._llm.invoke(messages, run_id=run_id)
+                # On the last iteration call the LLM with tools unbound (never use tool_choice="none")
+                if _iteration == MAX_ITERATIONS - 1:
+                    active_llm = self._raw_llm
+                    messages.append(HumanMessage(content="You have reached the maximum tool iterations. Summarize your findings and conclusions now in plain text without calling any tools."))
+                else:
+                    active_llm = self._llm
+
+                try:
+                    response: AIMessage = active_llm.invoke(messages, run_id=run_id)
+                except BudgetExceeded:
+                    raise
+                except Exception as exc:
+                    err_str = str(exc)
+                    if "tool_use_failed" in err_str or "Tool choice is none" in err_str:
+                        logger.warning("Caught tool_use_failed (400) on agent '%s'. Retrying once with tools unbound...", self.name)
+                        try:
+                            fallback_msgs = list(messages) + [
+                                HumanMessage(content="Tool call failed. Provide your final answer and summary now in plain text without calling any tools.")
+                            ]
+                            response = self._raw_llm.invoke(fallback_msgs, run_id=run_id)
+                        except BudgetExceeded:
+                            raise
+                        except Exception as retry_exc:
+                            return TaskResult(
+                                task_id=task_id,
+                                status=TaskStatus.FAILED,
+                                error=f"Tool use failed (400) and unbound fallback failed: {retry_exc}",
+                                tool_calls_made=tool_calls_made,
+                                latency_ms=(time.monotonic() - t_start) * 1000,
+                            )
+                    else:
+                        raise
+
                 messages.append(response)
 
-                if not response.tool_calls:
+                if not getattr(response, "tool_calls", None):
                     break
 
                 for tc in response.tool_calls:
@@ -83,7 +118,111 @@ class BaseSpecialistAgent:
                         )
                     )
 
-            result = self._parse_result(task_id, messages, tool_calls_made)
+                    if self.name == "fault" and isinstance(tool_output, dict):
+                        if "anomalies" in tool_name:
+                            tot_anom = (tool_output.get("metrics") or {}).get("total_anomalies", 0)
+                            if tot_anom > 0:
+                                anomaly_sentence = f"Anomalies found: {tot_anom} statistical anomaly datapoints detected."
+                            else:
+                                anomaly_sentence = "Anomalies found: none."
+
+                        if tool_output.get("data_ref"):
+                            try:
+                                from solar_agent.graph.data_store import DataStore
+                                import pandas as pd
+                                import yaml
+                                from solar_agent.config.settings import STATUS_CODES_PATH
+                                from solar_agent.tools import metrics as m
+
+                                sc_dict = {}
+                                try:
+                                    with open(STATUS_CODES_PATH, "r", encoding="utf-8") as sc_f:
+                                        sc_dict = yaml.safe_load(sc_f).get("status_codes", {})
+                                except Exception:
+                                    pass
+
+                                base_ref = inputs.get("data_ref")
+                                base_df = DataStore.get(base_ref) if base_ref else None
+                                if base_df is not None and not base_df.empty and "performance_ratio" not in base_df.columns:
+                                    base_df = m.compute_performance_ratio(base_df)
+
+                                f_df = DataStore.get(tool_output["data_ref"])
+                                if f_df is not None and not f_df.empty:
+                                    if "anomalies" in tool_name:
+                                        flag_cols = [c for c in f_df.columns if c.endswith("_is_anomaly")]
+                                        if flag_cols:
+                                            f_df = f_df[f_df[flag_cols].any(axis=1)]
+                                    for _, row in f_df.head(10).iterrows():
+                                        inv_id = str(row.get("inverter_id", ""))
+                                        blk = str(row.get("block_name", row.get("block_id", "")))
+                                        dt_val = str(row.get("log_date", ""))
+                                        sc_val = int(row.get("status_code", 0)) if pd.notna(row.get("status_code")) else 0
+                                        pr_val = round(float(row.get("performance_ratio", 0.0)), 4) if "performance_ratio" in row and pd.notna(row.get("performance_ratio")) else 0.0
+
+                                        sc_info = sc_dict.get(sc_val, {})
+                                        sc_label = sc_info.get("label", str(sc_val))
+                                        sc_desc = sc_info.get("description", "").strip().replace("\n", " ")
+                                        sc_meaning = f"{sc_label}: {sc_desc}" if sc_desc else sc_label
+
+                                        peer_pr = 0.0
+                                        peer_irr = 0.0
+                                        if base_df is not None and not base_df.empty:
+                                            b_match = (base_df["block_name"] == blk) if "block_name" in base_df.columns else (base_df["block_id"] == blk)
+                                            d_match = base_df["log_date"].astype(str) == dt_val
+                                            i_match = base_df["inverter_id"] != inv_id
+                                            peers = base_df[b_match & d_match & i_match]
+                                            if not peers.empty:
+                                                if "performance_ratio" in peers.columns:
+                                                    peer_pr = round(float(peers["performance_ratio"].mean()), 4)
+                                                if "total_solar_radiation_kwh_m2" in peers.columns:
+                                                    peer_irr = round(float(peers["total_solar_radiation_kwh_m2"].mean()), 2)
+
+                                        item = {
+                                            "inverter_id": inv_id,
+                                            "block": blk,
+                                            "date": dt_val,
+                                            "status_code": sc_val,
+                                            "status_meaning": sc_meaning,
+                                            "pr": pr_val,
+                                            "peer_pr": peer_pr,
+                                            "peer_irradiance": peer_irr,
+                                            "flagging_tool": tool_name,
+                                        }
+                                        if item not in flagged_items and len(flagged_items) < 10:
+                                            flagged_items.append(item)
+                            except Exception as e:
+                                logger.debug("Could not collect flagged items: %s", e)
+
+            # Ensure fault agent always runs all four fault tools
+            if self.name == "fault":
+                required_fault_tools = [
+                    "detect_zero_generation_tool",
+                    "detect_status_faults_tool",
+                    "detect_peer_underperformance_tool",
+                    "detect_anomalies_tool",
+                ]
+                missing_tools = [t for t in required_fault_tools if t not in tool_calls_made]
+                if missing_tools:
+                    logger.info("Fault agent missing required tools %s; invoking them now.", missing_tools)
+                    base_ref = inputs.get("data_ref")
+                    for m_tool in missing_tools:
+                        tool_calls_made.append(m_tool)
+                        tool_output = self._call_tool(m_tool, {"data_ref": base_ref} if base_ref else {})
+                        messages.append(
+                            ToolMessage(
+                                content=json.dumps(tool_output, default=str),
+                                tool_call_id=f"auto_{m_tool}",
+                            )
+                        )
+                        if isinstance(tool_output, dict):
+                            if "anomalies" in m_tool:
+                                tot_anom = (tool_output.get("metrics") or {}).get("total_anomalies", 0)
+                                if tot_anom > 0:
+                                    anomaly_sentence = f"Anomalies found: {tot_anom} statistical anomaly datapoints detected."
+                                else:
+                                    anomaly_sentence = "Anomalies found: none."
+
+            result = self._parse_result(task_id, messages, tool_calls_made, flagged_items=flagged_items, anomaly_sentence=anomaly_sentence)
 
         except BudgetExceeded:
             raise
@@ -122,6 +261,8 @@ class BaseSpecialistAgent:
         task_id: str,
         messages: list,
         tool_calls_made: list[str],
+        flagged_items: list[dict] | None = None,
+        anomaly_sentence: str | None = None,
     ) -> TaskResult:
         final_ai_msg = next(
             (m for m in reversed(messages) if isinstance(m, AIMessage)), None
@@ -150,12 +291,18 @@ class BaseSpecialistAgent:
                 except (json.JSONDecodeError, TypeError):
                     pass
 
+        if flagged_items:
+            metrics["flagged_items"] = flagged_items[:10]
+        if self.name == "fault":
+            metrics["anomaly_sentence"] = anomaly_sentence or "Anomalies found: none."
+
         return TaskResult(
             task_id=task_id,
             status=TaskStatus.DONE,
             summary=summary,
             data_ref=data_ref,
             metrics=metrics if metrics else None,
+            warnings=warnings,
             tool_calls_made=tool_calls_made,
         )
 
@@ -205,10 +352,13 @@ class SingleCallAgent:
             raise ValueError(f"Agent '{self.name}' must define at least one tool.")
         self._tool_map: dict[str, BaseTool] = {t.name: t for t in self.tools}
         # Build tool descriptions for the system prompt
-        tool_descs = "\n".join(
-            f"  - {t.name}: {(t.description or '').split(chr(10))[0]}"
-            for t in self.tools
-        )
+        descs = []
+        for t in self.tools:
+            arg_names = list(t.args.keys()) if hasattr(t, "args") and t.args else []
+            args_str = f"({', '.join(arg_names)})" if arg_names else ""
+            summary = (t.description or "").split(chr(10))[0]
+            descs.append(f"  - {t.name}{args_str}: {summary}")
+        tool_descs = "\n".join(descs)
         system_content = _TOOL_SELECT_SYSTEM.format(tool_descriptions=tool_descs)
         self._system_msg = SystemMessage(content=system_content)
         # Bind WITHOUT tools so the LLM returns plain JSON text (not tool_calls)
@@ -225,33 +375,93 @@ class SingleCallAgent:
         human_text = "\n".join(human_parts)
 
         try:
-            # --- Single LLM call: ask it to pick a tool ---
-            response: AIMessage = self._llm.invoke(
+            # --- LLM call: ask it to pick a tool ---
+            response = self._llm.invoke(
                 [self._system_msg, HumanMessage(content=human_text)],
                 run_id=run_id,
             )
-            raw = response.content.strip()
-            if raw.startswith("```"):
-                raw = raw.split("```")[1].lstrip("json").strip()
 
-            # ── malformed JSON → return FAILED immediately (item 5) ──
+            def _extract_selection(resp: Any) -> dict:
+                # 1. Check if tool_calls were emitted by ChatGroq
+                if hasattr(resp, "tool_calls") and resp.tool_calls:
+                    tc = resp.tool_calls[0]
+                    t_name = tc.get("name", "")
+                    t_args = tc.get("args", {})
+                    if isinstance(t_args, str):
+                        try:
+                            t_args = json.loads(t_args)
+                        except Exception:
+                            t_args = {}
+                    if t_name:
+                        return {"tool": t_name, "args": t_args}
+
+                raw = getattr(resp, "content", "")
+                if isinstance(raw, list):
+                    raw = "".join(b.get("text", "") if isinstance(b, dict) else str(b) for b in raw)
+                raw = str(raw).strip()
+
+                if "```" in raw:
+                    parts = raw.split("```")
+                    if len(parts) >= 2:
+                        raw = parts[1]
+                        if raw.startswith("json"):
+                            raw = raw[4:]
+                        raw = raw.strip()
+
+                try:
+                    res = json.loads(raw)
+                    if isinstance(res, dict):
+                        return res
+                    raise ValueError(f"Expected JSON object, got {type(res)}")
+                except Exception:
+                    start = raw.find("{")
+                    end = raw.rfind("}")
+                    if start != -1 and end != -1 and end > start:
+                        res = json.loads(raw[start:end+1])
+                        if isinstance(res, dict):
+                            return res
+                    raise
+
             try:
-                selection = json.loads(raw)
-            except (json.JSONDecodeError, ValueError) as parse_err:
-                logger.error(
-                    "SingleCallAgent[%s] malformed JSON from LLM: %s | raw=%r",
-                    task_id, parse_err, raw[:120],
+                selection = _extract_selection(response)
+            except Exception as parse_err:
+                logger.warning(
+                    "SingleCallAgent[%s] malformed JSON from LLM: %s. Retrying with reminder...",
+                    task_id, parse_err,
                 )
-                return TaskResult(
-                    task_id=task_id,
-                    status=TaskStatus.FAILED,
-                    error=f"Malformed JSON from LLM: {parse_err}",
-                    tool_calls_made=tool_calls_made,
-                    latency_ms=(time.monotonic() - t_start) * 1000,
-                )
+                retry_messages = [
+                    self._system_msg,
+                    HumanMessage(content=human_text),
+                    AIMessage(content=getattr(response, "content", "") if response is not None else ""),
+                    HumanMessage(
+                        content="Your previous response was not valid JSON. Please return valid JSON only matching the schema: {\"tool\": \"<tool_name>\", \"args\": {<args>}}"
+                    ),
+                ]
+                try:
+                    retry_resp = self._llm.invoke(retry_messages, run_id=run_id)
+                    selection = _extract_selection(retry_resp)
+                except Exception as retry_err:
+                    logger.error(
+                        "SingleCallAgent[%s] malformed JSON from LLM after retry: %s",
+                        task_id, retry_err,
+                    )
+                    return TaskResult(
+                        task_id=task_id,
+                        status=TaskStatus.FAILED,
+                        error=f"Malformed JSON from LLM: {retry_err}",
+                        tool_calls_made=tool_calls_made,
+                        latency_ms=(time.monotonic() - t_start) * 1000,
+                    )
 
             tool_name = selection.get("tool", "")
             tool_args = selection.get("args", {})
+            if isinstance(tool_args, dict):
+                if "aggregation_level" in tool_args and "level" not in tool_args:
+                    tool_args["level"] = tool_args.pop("aggregation_level")
+                if "time_period" in tool_args and "period" not in tool_args:
+                    tool_args["period"] = tool_args.pop("time_period")
+                if not tool_args.get("data_ref") and inputs.get("data_ref"):
+                    tool_args["data_ref"] = inputs["data_ref"]
 
             # ── unknown tool → return FAILED immediately (item 5) ──
             tool = self._tool_map.get(tool_name)
@@ -290,6 +500,7 @@ class SingleCallAgent:
                 summary=summary_text,
                 data_ref=data_ref,
                 metrics=metrics if metrics else None,
+                warnings=warnings,
                 tool_calls_made=tool_calls_made,
                 latency_ms=(time.monotonic() - t_start) * 1000,
             )

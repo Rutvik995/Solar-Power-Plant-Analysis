@@ -195,10 +195,29 @@ def fetch_inverter_daily(
             params[f"plant_id_{i}"] = pid
 
     if block_ids:
-        placeholders = ", ".join(f":block_id_{i}" for i in range(len(block_ids)))
-        block_filter = f"AND inv.block_id IN ({placeholders})"
-        for i, bid in enumerate(block_ids):
-            params[f"block_id_{i}"] = bid
+        int_ids = []
+        str_names = []
+        for bid in block_ids:
+            if isinstance(bid, int):
+                int_ids.append(bid)
+            elif str(bid).isdigit():
+                int_ids.append(int(bid))
+            else:
+                str_names.append(str(bid))
+
+        block_clauses = []
+        if int_ids:
+            phs = ", ".join(f":block_id_{i}" for i in range(len(int_ids)))
+            block_clauses.append(f"inv.block_id IN ({phs})")
+            for i, bid in enumerate(int_ids):
+                params[f"block_id_{i}"] = bid
+        if str_names:
+            phs = ", ".join(f":block_name_{i}" for i in range(len(str_names)))
+            block_clauses.append(f"(b.block_name IN ({phs}) OR REPLACE(b.block_name, '_', ' ') IN ({phs}))")
+            for i, s in enumerate(str_names):
+                params[f"block_name_{i}"] = s.strip()
+        if block_clauses:
+            block_filter = f"AND ({' OR '.join(block_clauses)})"
 
     if inverter_ids:
         placeholders = ", ".join(f":inverter_id_{i}" for i in range(len(inverter_ids)))

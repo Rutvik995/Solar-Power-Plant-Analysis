@@ -26,10 +26,11 @@ from solar_agent.tools.performance_tools import (
 
 
 class ComputeKpisSchema(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
     data_ref: str
-    level: str = Field(default="plant")
-    period: str = Field(default="total")
+    level: str = Field(default="plant", alias="aggregation_level")
+    period: str = Field(default="total", alias="time_period")
+
 
 @tool(args_schema=ComputeKpisSchema)
 def compute_kpis_tool(data_ref: str, level: str = "plant", period: str = "total") -> dict:

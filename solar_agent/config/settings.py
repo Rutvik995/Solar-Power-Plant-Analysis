@@ -8,7 +8,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # ---------------------------------------------------------------------------
@@ -39,40 +39,55 @@ class Settings(BaseSettings):
         description="Read-only PostgreSQL connection string (psycopg v3 driver).",
     )
 
-    # --- LLM Models (per role) ---
-    # Provider choices: "gemini", "anthropic", "openai", "ollama"
+    # --- LLM Models & Providers ---
+    # Default provider: "groq". Also supports: "gemini", "anthropic", "openai", "ollama"
+    llm_provider: str = Field(
+        default="groq",
+        description="Default LLM provider across roles (from LLM_PROVIDER).",
+    )
     planner_provider: str = Field(
-        default="gemini",
+        default="groq",
         description="LLM provider for the Orchestrator (planner) role.",
     )
     planner_model: str = Field(
-        default="gemini-3.8-flash",
-        description="LLM model for Orchestrator and Synthesizer.",
+        default="",
+        validation_alias=AliasChoices("LLM_PLANNER_MODEL", "planner_model"),
+        description="LLM model for Orchestrator/Planner (env: LLM_PLANNER_MODEL).",
     )
     agent_provider: str = Field(
-        default="gemini",
+        default="groq",
         description="LLM provider for specialist agents (fault, performance, environment).",
     )
     agent_model: str = Field(
-        default="gemini-3.8-flash",
-        description="LLM model for specialist agents.",
+        default="",
+        validation_alias=AliasChoices("LLM_AGENT_MODEL", "agent_model"),
+        description="LLM model for specialist agents (env: LLM_AGENT_MODEL).",
     )
     synthesizer_provider: str = Field(
-        default="gemini",
+        default="groq",
         description="LLM provider for the Synthesizer role.",
     )
     synthesizer_model: str = Field(
-        default="gemini-3.8-flash",
-        description="LLM model for the Synthesizer.",
+        default="",
+        validation_alias=AliasChoices("LLM_SYNTH_MODEL", "synthesizer_model"),
+        description="LLM model for the Synthesizer (env: LLM_SYNTH_MODEL).",
     )
-    # Data Agent / Validator → cost-efficient, fast (legacy alias)
+    # Legacy alias
     fast_model: str = Field(
-        default="gemini-3.8-flash",
+        default="",
         description="LLM model for Data Agent and Validator (legacy alias for agent_model).",
+    )
+    groq_api_key: str = Field(
+        default="",
+        description="Groq API key (env: GROQ_API_KEY).",
     )
     google_api_key: str = Field(
         default="",
         description="Google AI API key (for Gemini models).",
+    )
+    llm_max_rpm: int = Field(
+        default=20,
+        description="Maximum requests per minute allowed for LLM calls (default: 20).",
     )
 
     # --- SQL Guardrails ---

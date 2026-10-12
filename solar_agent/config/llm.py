@@ -47,6 +47,8 @@ from typing import Any
 
 from solar_agent.config.settings import settings
 
+import os
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -59,6 +61,23 @@ _ROLES = {"planner", "agent", "synthesizer"}
 # ---------------------------------------------------------------------------
 # Provider factory (lazy imports)
 # ---------------------------------------------------------------------------
+
+def _build_groq(model: str, **kwargs: Any):
+    try:
+        from langchain_groq import ChatGroq  # type: ignore[import]
+    except ImportError as e:
+        raise ImportError(
+            "Provider 'groq' requires the langchain-groq package. "
+            "Install it with: pip install langchain-groq"
+        ) from e
+    api_key = os.getenv("GROQ_API_KEY") or getattr(settings, "groq_api_key", "") or None
+    call_kwargs = dict(kwargs)
+    if api_key:
+        call_kwargs["groq_api_key"] = api_key
+    if model:
+        call_kwargs["model"] = model
+    return ChatGroq(**call_kwargs)
+
 
 def _build_gemini(model: str, **kwargs: Any):
     try:
@@ -106,6 +125,7 @@ def _build_ollama(model: str, **kwargs: Any):
 
 
 _PROVIDER_BUILDERS = {
+    "groq": _build_groq,
     "gemini": _build_gemini,
     "anthropic": _build_anthropic,
     "openai": _build_openai,
@@ -118,18 +138,31 @@ _PROVIDER_BUILDERS = {
 # ---------------------------------------------------------------------------
 
 def _role_config(role: str) -> tuple[str, str]:
-    """Return (provider, model) for the given role, reading from settings."""
+    """Return (provider, model) for the given role, reading from env and settings."""
+    default_provider = getattr(settings, "llm_provider", "groq") or os.getenv("LLM_PROVIDER") or "groq"
+
     if role == "planner":
-        provider = getattr(settings, "planner_provider", "gemini")
-        model = getattr(settings, "planner_model", "gemini-3.8-pro")
+        provider = getattr(settings, "planner_provider", "") or os.getenv("PLANNER_PROVIDER") or default_provider
+        model = (
+            getattr(settings, "planner_model", "")
+            or os.getenv("LLM_PLANNER_MODEL", "")
+            or os.getenv("PLANNER_MODEL", "")
+        )
     elif role == "agent":
-        provider = getattr(settings, "agent_provider", "gemini")
-        model = getattr(settings, "agent_model",
-                        getattr(settings, "fast_model", "gemini-3.8-flash"))
+        provider = getattr(settings, "agent_provider", "") or os.getenv("AGENT_PROVIDER") or default_provider
+        model = (
+            getattr(settings, "agent_model", "")
+            or os.getenv("LLM_AGENT_MODEL", "")
+            or getattr(settings, "fast_model", "")
+            or os.getenv("AGENT_MODEL", "")
+        )
     elif role == "synthesizer":
-        provider = getattr(settings, "synthesizer_provider", "gemini")
-        model = getattr(settings, "synthesizer_model",
-                        getattr(settings, "planner_model", "gemini-3.8-pro"))
+        provider = getattr(settings, "synthesizer_provider", "") or os.getenv("SYNTHESIZER_PROVIDER") or default_provider
+        model = (
+            getattr(settings, "synthesizer_model", "")
+            or os.getenv("LLM_SYNTH_MODEL", "")
+            or os.getenv("SYNTHESIZER_MODEL", "")
+        )
     else:
         raise ValueError(
             f"Unknown LLM role '{role}'. Valid roles: {sorted(_ROLES)}"
