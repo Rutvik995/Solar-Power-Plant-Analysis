@@ -10,6 +10,9 @@ dist/
 build/
 .eggs/
 
+# Dependencies
+node_modules/
+
 # Virtual environments
 .venv/
 .venv312/

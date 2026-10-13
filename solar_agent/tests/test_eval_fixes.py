@@ -133,3 +133,68 @@ def test_q21_planner_expected_yield_in_scope():
     tasks = result["plan"].tasks
     assert len(tasks) == 2
     assert tasks[1].agent == "performance"
+
+
+# ---------------------------------------------------------------------------
+# Cache key tests: model name, tool schemas, tool results must affect hash
+# ---------------------------------------------------------------------------
+
+def test_cache_key_changes_on_system_prompt():
+    """Changing the system prompt must cause a cache miss (different hash)."""
+    from solar_agent.graph.llm_recorder import _hash_request
+    from langchain_core.messages import SystemMessage, HumanMessage
+
+    msgs1 = [SystemMessage(content="You are agent A."), HumanMessage(content="Hello")]
+    msgs2 = [SystemMessage(content="You are agent B."), HumanMessage(content="Hello")]
+    assert _hash_request(msgs1) != _hash_request(msgs2), \
+        "Different system prompts must produce different cache keys"
+
+
+def test_cache_key_changes_on_tool_result():
+    """Changing a tool result in the message list must cause a cache miss."""
+    from solar_agent.graph.llm_recorder import _hash_request
+    from langchain_core.messages import SystemMessage, HumanMessage, ToolMessage
+
+    base = [SystemMessage(content="SYS"), HumanMessage(content="Query")]
+    msgs_a = base + [ToolMessage(content='{"soiling_loss": 1000}', tool_call_id="tc1")]
+    msgs_b = base + [ToolMessage(content='{"soiling_loss": 9999}', tool_call_id="tc1")]
+    assert _hash_request(msgs_a) != _hash_request(msgs_b), \
+        "Different tool results must produce different cache keys"
+
+
+def test_cache_key_changes_on_model_name():
+    """Changing the model name must cause a cache miss."""
+    from solar_agent.graph.llm_recorder import _hash_request
+    from langchain_core.messages import HumanMessage
+
+    msgs = [HumanMessage(content="What is the PR?")]
+    hash_70b = _hash_request(msgs, model_name="llama-3.3-70b-versatile")
+    hash_8b  = _hash_request(msgs, model_name="llama-3.1-8b-instant")
+    assert hash_70b != hash_8b, \
+        "Different model names must produce different cache keys"
+
+
+def test_cache_replay_raises_on_miss():
+    """ReplayLLM must raise CacheMissError on miss (never fall through to live)."""
+    import tempfile, os
+    from solar_agent.graph.llm_recorder import ReplayLLM, CacheMissError, _SHARED_CACHES
+    from langchain_core.messages import HumanMessage
+
+    # Use an isolated empty cache file
+    with tempfile.NamedTemporaryFile(suffix=".json", mode="w", delete=False) as tmp:
+        tmp.write("{}")
+        tmp_path = tmp.name
+
+    try:
+        # Clear shared caches so our empty file is loaded fresh
+        _SHARED_CACHES.clear()
+        replay = ReplayLLM(fallback_llm=None, mode="replay",
+                           cache_name=os.path.basename(tmp_path))
+        # Force the cache file path
+        replay.cache_file = type(replay.cache_file)(tmp_path)
+        replay.cache = {}
+
+        with pytest.raises(CacheMissError):
+            replay.invoke([HumanMessage(content="no-entry-exists")])
+    finally:
+        os.unlink(tmp_path)

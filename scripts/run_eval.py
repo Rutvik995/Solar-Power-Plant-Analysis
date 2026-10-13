@@ -6,13 +6,14 @@ Scoring dimensions per question:
   - tools_match     (0-1): fraction of expected tools that appeared in planned tasks
   - numbers_grounded (0-1): fraction of key_numbers found in final answer (±2%)
   - unexpected_nums  (int): count of numbers in answer NOT in expected OR tool outputs
+  - fallback_used   (yes/no): whether synthesizer fell back to raw metrics template
 
 Summary table is printed to stdout. Exits with code 1 if average score < 0.7.
 
 Usage:
-    python scripts/run_eval.py               # replay mode (requires cache)
-    python scripts/run_eval.py --live        # live mode (uses quota)
-    python scripts/run_eval.py --questions q01,q05
+    python scripts/run_eval.py --replay              # strict replay (zero live calls)
+    python scripts/run_eval.py --record              # record missing entries, replay cached
+    python scripts/run_eval.py --record --questions q01,q05  # record specific questions
 """
 import argparse
 import json
@@ -188,10 +189,14 @@ NON_ANALYSIS_TOOLS = {
 
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--live", action="store_true", help="Use live LLM instead of cache.")
-    parser.add_argument("--record", action="store_true", help="Run live LLM and record to cache.")
-    parser.add_argument("--replay", action="store_true", help="Strict replay mode only.")
+    parser = argparse.ArgumentParser(
+        description="Evaluate the solar multi-agent system against the 25-question benchmark."
+    )
+    mode_group = parser.add_mutually_exclusive_group(required=True)
+    mode_group.add_argument("--record", action="store_true",
+        help="Record mode: call live LLM for misses, save to cache.")
+    mode_group.add_argument("--replay", action="store_true",
+        help="Replay mode: serve from cache only; raise on miss (zero live calls).")
     parser.add_argument("--questions", default=None, help="Comma-separated question IDs.")
     args = parser.parse_args()
 
@@ -213,21 +218,14 @@ def main():
 
     if args.replay:
         dummy = ReplayLLM(fallback_llm=None, mode="replay")
-        print(f"Mode: REPLAY ({dummy.cache_size()} cached entries)")
+        print(f"Mode: REPLAY ({dummy.cache_size()} cached entries, zero live calls)")
         graph = build_graph(mode="replay")
-    elif args.live:
-        if not api_key:
-            print("ERROR: No API key found for live mode.", file=sys.stderr)
-            sys.exit(1)
-        print("Mode: LIVE (uses quota)")
-        graph = build_graph(mode="live")
-    else:
-        # Default: record mode (replays where cached, records live otherwise)
+    else:  # --record
         if not api_key:
             print("ERROR: No API key found for record mode.", file=sys.stderr)
             sys.exit(1)
         dummy = ReplayLLM(fallback_llm=None, mode="record")
-        print(f"Mode: RECORD/HYBRID ({dummy.cache_size()} cached entries, live fallback)")
+        print(f"Mode: RECORD ({dummy.cache_size()} cached entries, live fallback for misses)")
         graph = build_graph(mode="record")
 
     rows = []
@@ -301,6 +299,14 @@ def main():
         numbers_grounded, unexpected_count = _score_numbers(expected_nums, answer, ground_values)
         unexpect_score = max(0.0, 1.0 - unexpected_count * 0.1)
 
+        # Detect fallback: synthesizer fell back to raw metrics template
+        fallback_used = "raw metrics (fallback" in answer
+        # Collect grounding-failed numbers when fallback triggered
+        fallback_ungrounded: list[float] = []
+        if fallback_used and expected_nums:
+            answer_nums = _extract_numbers(answer)
+            fallback_ungrounded = [n for n in answer_nums if not any(_is_close(n, g) for g in ground_values + expected_nums)]
+
         row = {
             "id": qid,
             "intent": intent_match,
@@ -309,12 +315,14 @@ def main():
             "unexpected": unexpected_count,
             "unexpect_score": round(unexpect_score, 2),
             "calls": calls,
+            "fallback": "yes" if fallback_used else "no",
+            "fallback_ungrounded": fallback_ungrounded,
             "status": "ok"
         }
         rows.append(row)
 
         print(f"  intent={intent_match} tools={tools_match:.2f} "
-              f"numbers={numbers_grounded:.2f} unexpected={unexpected_count} calls={calls}")
+              f"numbers={numbers_grounded:.2f} unexpected={unexpected_count} fallback={row['fallback']} calls={calls}")
         if answer:
             print(f"  answer: {answer[:160].replace(chr(10),' ')}...")
 
@@ -322,12 +330,12 @@ def main():
             time.sleep(float(os.environ.get("EVAL_SLEEP", "1.5")))
 
     # Summary table
-    print("\n" + "=" * 76)
-    print(f"{'ID':<6} {'Intent':>6} {'Tools':>6} {'Numbers':>8} {'Unexpect':>9} {'Calls':>6} {'Status'}")
-    print("-" * 76)
+    print("\n" + "=" * 88)
+    print(f"{'ID':<6} {'Intent':>6} {'Tools':>6} {'Numbers':>8} {'Unexpect':>9} {'Fallback':>9} {'Calls':>6} {'Status'}")
+    print("-" * 88)
     for r in rows:
         print(f"{r['id']:<6} {r['intent']:>6} {r['tools']:>6.2f} {r['numbers']:>8.2f}"
-              f" {r['unexpected']:>9} {r.get('calls', 0):>6}   {r['status']}")
+              f" {r['unexpected']:>9} {r.get('fallback', 'no'):>9} {r.get('calls', 0):>6}   {r['status']}")
 
     ok_rows = [r for r in rows if r["status"] == "ok"]
     if ok_rows:
@@ -337,12 +345,21 @@ def main():
         total_unexpected = sum(r["unexpected"] for r in ok_rows)
         avg_unexpect_score = sum(r["unexpect_score"] for r in ok_rows) / len(ok_rows)
         avg_calls = sum(r.get("calls", 0) for r in ok_rows) / len(ok_rows)
-        print("-" * 76)
+        fallback_count = sum(1 for r in ok_rows if r.get("fallback") == "yes")
+        fallback_rate = fallback_count / len(ok_rows)
+        print("-" * 88)
         print(f"{'AVG':<6} {avg_intent:>6.2f} {avg_tools:>6.2f} {avg_numbers:>8.2f}"
-              f" {total_unexpected:>9} {avg_calls:>6.1f}   ({len(ok_rows)} questions scored)")
+              f" {total_unexpected:>9} {fallback_rate:>8.0%} {avg_calls:>6.1f}   ({len(ok_rows)} questions scored)")
 
         overall = (avg_intent + avg_tools + avg_numbers + avg_unexpect_score) / 4
         print(f"\nOverall score: {overall:.2%} (Intent: {avg_intent:.2f}, Tools: {avg_tools:.2f}, Numbers: {avg_numbers:.2f}, Unexpected: {avg_unexpect_score:.2f})")
+        print(f"Fallback rate: {fallback_rate:.0%} ({fallback_count}/{len(ok_rows)} questions used raw-metrics fallback)")
+
+        # Print fallback details
+        for r in ok_rows:
+            if r.get("fallback") == "yes" and r.get("fallback_ungrounded"):
+                print(f"  {r['id']} fallback ungrounded numbers: {r['fallback_ungrounded']}")
+
         if overall < 0.70:
             print("FAIL: score below 70% threshold.")
             sys.exit(1)
