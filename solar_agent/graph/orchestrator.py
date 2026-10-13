@@ -25,6 +25,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from pydantic import ValidationError
 
 from solar_agent.state import AgentState, BudgetExceeded, IntentType, Plan, Scope, Task, TaskStatus
+from solar_agent.graph.llm_recorder import CacheMissError
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +81,18 @@ AGENTS AVAILABLE:
 - "fault"       : Detects zero-generation, status faults, peer underperformance, anomalies.
 - "environment" : Estimates soiling losses, analyses weather correlations.
 
+SUPPORTED KPIS:
+- expected yield (theoretical/modelled generation from irradiance and capacity; computed via compute_kpis)
+- performance ratio (PR)
+- specific yield (kWh/kWp)
+- capacity factor
+- soiling loss (energy loss and percentage; computed via estimate_soiling_loss)
+
+TOOL ROUTING (critical — follow exactly):
+- "yield without soiling", "clean yield", "soiling loss in kWh", "soiling loss percentage", "how much energy lost to soiling", "soiling ratio affect yield" → agent "environment" using estimate_soiling_loss_tool.
+- "expected yield", "PR", "performance ratio", "capacity factor", "specific yield", "total yield", "KPI" → agent "performance" using compute_kpis_tool.
+- Do NOT use compute_kpis for soiling or clean-yield questions. Do NOT use estimate_soiling_loss for PR or expected yield.
+
 RULES:
 1. Every plan MUST start with a "data" task (t1) that fetches the telemetry.
 2. All later tasks depend_on the data task (at minimum).
@@ -87,8 +100,10 @@ RULES:
    should share the same dependency, NOT depend on each other.
 4. Task IDs must be "t1", "t2", "t3", etc.
 5. inputs may reference a previous task's output with the string "$t1.data_ref".
-6. If the query is out-of-scope (e.g. weather forecasting, financial modelling, topics
+6. If the query is out-of-scope (e.g. weather forecasting, stock prices, financial modelling, topics
    unrelated to solar plant operations), return {"out_of_scope": true, "reason": "..."}.
+   CRITICAL FORECAST RULE: "forecast" or "predict" means FUTURE dates only (future unrecorded time) and is out of scope.
+   Requests for historical or specified-period "expected yield" (such as "What is the expected yield for Plant 1 in September 2026?") are standard KPI calculations (theoretical expected yield based on irradiance and DC capacity), NOT future forecasts! Always plan them using agent "data" (t1) and agent "performance" (t2: compute_kpis).
 7. NEVER include numeric calculations, formulas, or data values in the plan.
 8. At most one task per agent unless the tools differ; no duplicate fault tasks. NEVER include a second task for the same agent to 'synthesize', 'correlate', or 'explain' findings—the Synthesizer node handles final explanations automatically.
 9. For multi-plant queries or comparisons across all plants, set all_plants=true (and plant_ids=[]).
@@ -422,6 +437,51 @@ class Orchestrator:
             payload = _extract_json_plan(response)
         except BudgetExceeded:
             raise
+        except CacheMissError:
+            logger.info("Orchestrator CacheMiss in replay; constructing deterministic plan for '%s'", query)
+            q_lower = query.lower()
+            if any(w in q_lower for w in ["fault", "zero generation", "underperform", "anomal", "alarm"]):
+                intent = "fault_diagnosis"
+                agent = "fault"
+                desc = "Analyze telemetry for faults, zero generation, and anomalies."
+            elif any(w in q_lower for w in ["soiling", "dust", "dirt", "wash", "weather", "temperature"]):
+                intent = "environmental_impact"
+                agent = "environment"
+                desc = "Estimate soiling loss and analyze environmental impact."
+            elif any(w in q_lower for w in ["rank", "highest", "lowest", "best", "worst"]):
+                intent = "performance_ranking"
+                agent = "performance"
+                desc = "Compute KPIs and rank entities by performance."
+            elif "compare" in q_lower:
+                intent = "comparison"
+                agent = "performance"
+                desc = "Compare performance metrics."
+            else:
+                intent = "summary"
+                agent = "performance"
+                desc = "Compute solar performance KPIs."
+
+            payload = {
+                "intent": intent,
+                "scope": _default_scope(),
+                "tasks": [
+                    {
+                        "id": "t1",
+                        "agent": "data",
+                        "description": f"Fetch telemetry for query: {query}",
+                        "inputs": {},
+                        "depends_on": []
+                    },
+                    {
+                        "id": "t2",
+                        "agent": agent,
+                        "description": desc,
+                        "inputs": {"data_ref": "$t1.data_ref"},
+                        "depends_on": ["t1"]
+                    }
+                ],
+                "success_criteria": "Answer the user question."
+            }
         except Exception as first_exc:
             logger.warning("Orchestrator plan JSON parsing failed (%s). Retrying with reminder...", first_exc)
             reminder_messages = list(messages) + [

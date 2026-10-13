@@ -59,6 +59,7 @@ def estimate_soiling_loss(data_ref: str) -> dict[str, Any]:
     cleaning_events = int(plant_daily["is_cleaning_event"].sum())
     total_loss_kwh = float(df["soiling_energy_loss_kwh"].sum())
     total_yield = float(df["total_daily_yield_kwh"].sum())
+    clean_yield_kwh = float(total_yield + total_loss_kwh)
     all_loss_pct = round((total_loss_kwh / total_yield * 100), 2) if total_yield > 0 else 0.0
 
     # Per-plant breakdown and all-plants total
@@ -70,6 +71,7 @@ def estimate_soiling_loss(data_ref: str) -> dict[str, Any]:
         pdf = df[df["plant_id"] == pid]
         p_loss = float(pdf["soiling_energy_loss_kwh"].sum())
         p_yield = float(pdf["total_daily_yield_kwh"].sum())
+        p_clean = float(p_yield + p_loss)
         p_pct = round((p_loss / p_yield * 100), 2) if p_yield > 0 else 0.0
         p_events = int(plant_daily[plant_daily["plant_id"] == pid]["is_cleaning_event"].sum()) if "plant_id" in plant_daily.columns else 0
         sr_min = round(float(pdf["soiling_ratio"].min()), 4) if "soiling_ratio" in pdf.columns and not pdf.empty else 0.0
@@ -80,7 +82,10 @@ def estimate_soiling_loss(data_ref: str) -> dict[str, Any]:
         plant_metrics[f"plant_{pid}_cleaning_events"] = p_events
         plant_metrics[f"plant_{pid}_soiling_ratio_min"] = sr_min
         plant_metrics[f"plant_{pid}_soiling_ratio_avg"] = sr_avg
-        plant_summaries.append(f"Plant {pid}: {p_loss:.1f} kWh ({p_pct}%, {p_events} cleanings, SR min {sr_min} / avg {sr_avg})")
+        plant_metrics[f"plant_{pid}_actual_yield_kwh"] = round(p_yield, 2)
+        plant_metrics[f"plant_{pid}_clean_yield_kwh"] = round(p_clean, 2)
+        plant_metrics[f"plant_{pid}_yield_without_soiling_kwh"] = round(p_clean, 2)
+        plant_summaries.append(f"Plant {pid}: {p_loss:.1f} kWh ({p_pct}%, {p_events} cleanings, SR min {sr_min} / avg {sr_avg}, clean yield {p_clean:.1f} kWh)")
 
     losses = [plant_metrics[f"plant_{pid}_soiling_loss_pct"] for pid in unique_plants]
     median_loss = round(float(np.median(losses)), 2) if losses else 0.0
@@ -97,6 +102,7 @@ def estimate_soiling_loss(data_ref: str) -> dict[str, Any]:
     if len(unique_plants) > 1:
         summary = (
             f"All-plants total soiling loss: {total_loss_kwh:.1f} kWh ({all_loss_pct}%) across {cleaning_events} cleaning events. "
+            f"Total actual yield: {total_yield:.1f} kWh, clean yield without soiling: {clean_yield_kwh:.1f} kWh. "
             f"Plant breakdown: {'; '.join(plant_summaries)}."
         )
     elif len(unique_plants) == 1:
@@ -104,15 +110,28 @@ def estimate_soiling_loss(data_ref: str) -> dict[str, Any]:
         p_loss = plant_metrics[f"plant_{pid}_soiling_loss_kwh"]
         p_pct = plant_metrics[f"plant_{pid}_soiling_loss_pct"]
         p_ev = plant_metrics[f"plant_{pid}_cleaning_events"]
-        summary = f"Plant {pid}: estimated {p_loss:.1f} kWh ({p_pct}%) soiling loss with {p_ev} cleaning events."
+        summary = (
+            f"Plant {pid}: estimated {p_loss:.1f} kWh ({p_pct}%) soiling loss with {p_ev} cleaning events. "
+            f"Actual yield: {total_yield:.1f} kWh, yield without soiling losses: {clean_yield_kwh:.1f} kWh."
+        )
     else:
-        summary = f"Estimated {total_loss_kwh:.1f} kWh total soiling loss. Detected {cleaning_events} cleaning events."
+        summary = (
+            f"Estimated {total_loss_kwh:.1f} kWh total soiling loss across {cleaning_events} cleaning events. "
+            f"Actual yield: {total_yield:.1f} kWh, yield without soiling: {clean_yield_kwh:.1f} kWh."
+        )
 
     all_metrics = {
         "all_plants_total_soiling_loss_kwh": round(total_loss_kwh, 2),
         "all_plants_total_cleaning_events": cleaning_events,
         "all_plants_soiling_loss_pct": all_loss_pct,
+        "all_plants_total_yield_kwh": round(total_yield, 2),
+        "all_plants_clean_yield_kwh": round(clean_yield_kwh, 2),
         "total_loss_kwh": round(total_loss_kwh, 2),
+        "total_yield_kwh": round(total_yield, 2),
+        "actual_yield_kwh": round(total_yield, 2),
+        "clean_yield_kwh": round(clean_yield_kwh, 2),
+        "clean_yield_without_soiling_kwh": round(clean_yield_kwh, 2),
+        "yield_without_soiling_kwh": round(clean_yield_kwh, 2),
         "cleaning_events_detected": cleaning_events,
         **plant_metrics,
     }

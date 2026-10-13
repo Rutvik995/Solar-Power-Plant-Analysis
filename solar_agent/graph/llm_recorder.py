@@ -27,21 +27,33 @@ logger = logging.getLogger(__name__)
 CACHE_DIR = Path(__file__).parent.parent / "tests" / "llm_cache"
 
 
+import re
+
+_SHARED_CACHES: dict[str, dict[str, dict]] = {}
+
+
 class CacheMissError(RuntimeError):
     """Raised in replay mode when a message hash has no cached response."""
+
+
+def _normalize_content(content: Any) -> str:
+    if not isinstance(content, str):
+        content = str(content)
+    # Normalize ephemeral dataframe references like df_8e45daf4 or df_20260901 to df_ref
+    return re.sub(r"\bdf_[0-9a-f]{8}\b", "df_ref", content)
 
 
 def _serialize_messages(messages: list[BaseMessage]) -> list[dict]:
     res = []
     for m in messages:
         if isinstance(m, SystemMessage):
-            res.append({"type": "system", "content": m.content})
+            res.append({"type": "system", "content": _normalize_content(m.content)})
         elif isinstance(m, HumanMessage):
-            res.append({"type": "human", "content": m.content})
+            res.append({"type": "human", "content": _normalize_content(m.content)})
         elif isinstance(m, AIMessage):
-            res.append({"type": "ai", "content": m.content, "tool_calls": getattr(m, "tool_calls", [])})
+            res.append({"type": "ai", "content": _normalize_content(m.content), "tool_calls": getattr(m, "tool_calls", [])})
         else:
-            res.append({"type": "other", "content": str(m.content)})
+            res.append({"type": "other", "content": _normalize_content(str(m.content))})
     return res
 
 
@@ -68,17 +80,27 @@ class ReplayLLM:
         self.fallback_llm = fallback_llm
         self.mode = mode
         self.cache_file = CACHE_DIR / cache_name
-        self.cache: dict[str, dict] = {}
+        cache_key = str(self.cache_file.resolve())
 
-        if self.mode in ("replay", "record") and self.cache_file.exists():
+        if cache_key not in _SHARED_CACHES:
+            _SHARED_CACHES[cache_key] = {}
+            if self.mode in ("replay", "record") and self.cache_file.exists():
+                try:
+                    with open(self.cache_file, "r", encoding="utf-8") as f:
+                        _SHARED_CACHES[cache_key] = json.load(f)
+                    logger.info(
+                        "Loaded %d cached LLM responses from %s", len(_SHARED_CACHES[cache_key]), self.cache_file
+                    )
+                except Exception as e:
+                    logger.error("Failed to load LLM cache: %s", e)
+        elif self.mode in ("replay", "record") and not _SHARED_CACHES[cache_key] and self.cache_file.exists():
             try:
-                with open(self.cache_file, "r") as f:
-                    self.cache = json.load(f)
-                logger.info(
-                    "Loaded %d cached LLM responses from %s", len(self.cache), self.cache_file
-                )
-            except Exception as e:
-                logger.error("Failed to load LLM cache: %s", e)
+                with open(self.cache_file, "r", encoding="utf-8") as f:
+                    _SHARED_CACHES[cache_key] = json.load(f)
+            except Exception:
+                pass
+
+        self.cache = _SHARED_CACHES[cache_key]
 
     # ---- public API -------------------------------------------------------
 
@@ -149,5 +171,12 @@ class ReplayLLM:
 
     def _save(self) -> None:
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        with open(self.cache_file, "w") as f:
+        try:
+            if self.cache_file.exists():
+                with open(self.cache_file, "r", encoding="utf-8") as f:
+                    disk_cache = json.load(f)
+                    self.cache.update(disk_cache)
+        except Exception:
+            pass
+        with open(self.cache_file, "w", encoding="utf-8") as f:
             json.dump(self.cache, f, indent=2, default=str)

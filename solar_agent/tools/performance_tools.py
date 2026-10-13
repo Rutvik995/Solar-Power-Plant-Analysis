@@ -60,11 +60,21 @@ def compute_kpis(
     if not df_agg.empty:
         if len(df_agg) == 1:
             row = df_agg.iloc[0]
+            pid = row.get("plant_id")
+            tot_y = round(float(row.get("total_daily_yield_kwh", 0)), 2)
+            exp_y = round(float(row.get("expected_yield_kwh", 0)), 2)
+            pr = round(float(row.get("performance_ratio", float("nan"))), 4)
             metrics_summary = {
-                "performance_ratio": round(float(row.get("performance_ratio", float("nan"))), 4),
-                "total_yield_kwh": round(float(row.get("total_daily_yield_kwh", 0)), 2),
-                "expected_yield_kwh": round(float(row.get("expected_yield_kwh", 0)), 2),
+                "performance_ratio": pr,
+                "total_yield_kwh": tot_y,
+                "expected_yield_kwh": exp_y,
+                "all_plants_total_yield_kwh": tot_y,
+                "all_plants_expected_yield_kwh": exp_y,
             }
+            if pd.notna(pid):
+                metrics_summary[f"plant_{int(pid)}_total_yield_kwh"] = tot_y
+                metrics_summary[f"plant_{int(pid)}_expected_yield_kwh"] = exp_y
+                metrics_summary[f"plant_{int(pid)}_performance_ratio"] = pr
         else:
             for _, row in df_agg.iterrows():
                 pid = row.get("plant_id")
@@ -74,12 +84,25 @@ def compute_kpis(
                     pid = "unknown"
                 metrics_summary[f"plant_{pid}_performance_ratio"] = round(float(row.get("performance_ratio", float("nan"))), 4)
                 metrics_summary[f"plant_{pid}_total_yield_kwh"] = round(float(row.get("total_daily_yield_kwh", 0)), 2)
+                if "expected_yield_kwh" in row:
+                    metrics_summary[f"plant_{pid}_expected_yield_kwh"] = round(float(row.get("expected_yield_kwh", 0)), 2)
             if "performance_ratio" in df_agg.columns:
                 metrics_summary["performance_ratio"] = round(float(df_agg["performance_ratio"].mean()), 4)
+            if "total_daily_yield_kwh" in df_agg.columns:
+                tot_all = round(float(df_agg["total_daily_yield_kwh"].sum()), 2)
+                metrics_summary["total_yield_kwh"] = tot_all
+                metrics_summary["all_plants_total_yield_kwh"] = tot_all
+            if "expected_yield_kwh" in df_agg.columns:
+                exp_all = round(float(df_agg["expected_yield_kwh"].sum()), 2)
+                metrics_summary["expected_yield_kwh"] = exp_all
+                metrics_summary["all_plants_expected_yield_kwh"] = exp_all
 
+    summary_text = f"Computed {period} KPIs at {level} level."
+    if "all_plants_total_yield_kwh" in metrics_summary:
+        summary_text += f" Total yield across all plants: {metrics_summary['all_plants_total_yield_kwh']} kWh."
 
     return {
-        "summary": f"Computed {period} KPIs at {level} level.",
+        "summary": summary_text,
         "metrics": metrics_summary,
         "data_ref": res_ref,
         "warnings": [],

@@ -83,10 +83,10 @@ class DetectAnomaliesSchema(BaseModel):
     model_config = ConfigDict(extra="forbid")
     data_ref: str
     z_threshold: float = Field(default=3.0)
-    window: int = Field(default=7)
+    window: int = Field(default=14)
 
 @tool(args_schema=DetectAnomaliesSchema)
-def detect_anomalies_tool(data_ref: str, z_threshold: float = 3.0, window: int = 7) -> dict:
+def detect_anomalies_tool(data_ref: str, z_threshold: float = 3.0, window: int = 14) -> dict:
     """
     Statistical anomaly detection using rolling z-score on PR, DC voltage, and DC current.
 

@@ -59,7 +59,16 @@ class DataStore:
         Auto-generates a short UUID key if none is provided.
         """
         if key is None:
-            key = f"df_{uuid.uuid4().hex[:8]}"
+            if df is None or df.empty:
+                h = "empty"
+            else:
+                try:
+                    import hashlib
+                    h = hashlib.md5(pd.util.hash_pandas_object(df, index=False).values.tobytes()).hexdigest()[:8]
+                except Exception:
+                    import hashlib
+                    h = hashlib.md5(f"{df.shape}_{list(df.columns)}".encode()).hexdigest()[:8]
+            key = f"df_{h}"
         with _lock:
             _store[key] = df
         return key

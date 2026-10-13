@@ -2,13 +2,13 @@
 
 ## Executive Summary
 
-The **Solar Power Plant Analysis Multi-Agent System** is an enterprise-grade, deterministic, and LLM-assisted intelligence platform designed to analyze operational telemetry from commercial and utility-scale solar photovoltaic (PV) power plants.
+The **Solar Power Plant Analysis Multi-Agent System** is a deterministic, LLM-assisted intelligence platform designed to analyze operational telemetry from commercial and utility-scale solar photovoltaic (PV) power plants.
 
-Built on **LangGraph**, **SQLAlchemy**, and modern Python 3.12, the system solves the primary vulnerability of standard LLM applications in engineering domains—**hallucination of quantitative metrics**—by strictly adhering to the architectural axiom:
+Built on **LangGraph**, **SQLAlchemy**, and Python 3.12, the system addresses the primary vulnerability of standard LLM applications in engineering domains—**hallucination of quantitative metrics**—by strictly adhering to the architectural axiom:
 
-> **"The LLM plans, coordinates, and explains; pure Python and SQL tools compute. No numerical value in any final response originates from LLM fabrication."**
+> **"The LLM plans, coordinates, and explains; pure Python and SQL tools compute. Numbers come directly from tool outputs, and an automated grounding check flags mismatches."**
 
-The platform features an end-to-end directed acyclic graph (DAG) execution engine, rigorous SQL security guardrails, thread-safe in-memory data management with disk spillover, a multi-role LLM provider factory, run-isolated query budget management, number-grounding response verification, and a comprehensive test suite of **232 passing automated tests**.
+The platform features an end-to-end directed acyclic graph (DAG) execution engine, AST-based SQL security guardrails, thread-safe in-memory data management with disk spillover, a multi-role LLM provider factory, run-isolated query budget management, number-grounding response verification, and a comprehensive test suite of **276 passing automated tests**.
 
 ---
 
@@ -18,7 +18,7 @@ The platform features an end-to-end directed acyclic graph (DAG) execution engin
 
 The system coordinates specialized autonomous nodes using LangGraph's `StateGraph`:
 
-```
+```text
                            ┌────────────────────────┐
                            │      User Query        │
                            └───────────┬────────────┘
@@ -71,249 +71,158 @@ Execution state is encapsulated in `AgentState` (defined in `solar_agent/state.p
 | `replan_count` | `int` | Number of replanning loops executed (capped at `settings.max_replan_loops = 2`). |
 | `final_answer` | `Optional[str]` | Grounded narrative explanation presented to the user. |
 | `llm_call_count`| `int` | Real-time count of LLM API invocations consumed during the query. |
-| `is_out_of_scope`| `bool` | Flag indicating query is non-solar or cannot be fulfilled. |
+| `is_out_of_scope`| `bool` | Flag indicating query is non-solar, predictive forecasting, or cannot be fulfilled. |
 
 ---
 
-## 2. Database Schema & Semantic Foundation
+## 2. Database Schema (from `information_schema`)
 
-The database models a hierarchical PV portfolio: **Plant → Block → Inverter**.
+The database models a hierarchical PV portfolio: **Plant → Block → Inverter**, with plant-level daily weather telemetry.
 
-### 2.1 Entity Relationship Model
+### 2.1 Table Definitions & Column Types
 
-```
- ┌──────────────────────────┐
- │          plants          │
- ├──────────────────────────┤
- │ PK  plant_id             │
- │     plant_name           │
- │     latitude, longitude  │
- │     capacity_mw          │
- └─────────────┬────────────┘
-               │ 1:N
-               ▼
- ┌──────────────────────────┐         ┌──────────────────────────┐
- │          blocks          │         │ daily_weather_telemetry  │
- ├──────────────────────────┤         ├──────────────────────────┤
- │ PK  block_id             │         │ PK  log_date             │
- │ FK  plant_id             │         │ PK  plant_id             │
- │     block_name           │         │     total_solar_rad_kwh_m2│ (Insolation H)
- └─────────────┬────────────┘         │     ambient_temp_c       │
-               │ 1:N                  │     module_temp_c        │
-               ▼                      │     soiling_ratio        │
- ┌──────────────────────────┐         └──────────────────────────┘
- │        inverters         │
- ├──────────────────────────┤
- │ PK  inverter_id          │
- │ FK  block_id             │
- │     rated_dc_kw          │
- │     rated_ac_kw          │
- └─────────────┬────────────┘
-               │ 1:N
-               ▼
- ┌──────────────────────────────────────────┐
- │         daily_inverter_telemetry         │
- ├──────────────────────────────────────────┤
- │ PK  log_date                             │
- │ PK  inverter_id                          │
- │ FK  plant_id                             │
- │     total_daily_yield_kwh                │
- │     peak_dc_power_kw, peak_ac_power_kw   │
- │     inverter_status_code                 │
- └──────────────────────────────────────────┘
-```
+#### `plants`
+Primary entity representing a solar power plant installation.
+| Column Name | Data Type | Key / Constraint | Description |
+|---|---|---|---|
+| `plant_id` | `integer` | Primary Key | Unique numeric plant identifier (1 to 5). |
+| `plant_name` | `character varying` | Not Null | Name of the solar facility (e.g., "Plant 1"). |
+| `area_acres` | `numeric` | | Physical land area in acres. |
+| `capacity_mwp` | `numeric` | | Total DC peak capacity in MWp. |
 
-### 2.2 Status Codes (`solar_agent/config/status_codes.yaml`)
+#### `blocks`
+Sub-division of a plant grouping inverters under common balance-of-system equipment.
+| Column Name | Data Type | Key / Constraint | Description |
+|---|---|---|---|
+| `block_id` | `integer` | Primary Key | Unique numeric block identifier. |
+| `plant_id` | `integer` | Foreign Key → `plants(plant_id)` | Owning plant ID. |
+| `block_name` | `character varying` | Not Null | Block designation (e.g., "Block A"). |
 
-Inverter operational health is classified using integer status codes:
+#### `inverters`
+Individual DC-to-AC conversion units.
+| Column Name | Data Type | Key / Constraint | Description |
+|---|---|---|---|
+| `inverter_id` | `character varying` | Primary Key | Alphanumeric inverter tag (e.g., "P1_Block_A_INV_01"). |
+| `block_id` | `integer` | Foreign Key → `blocks(block_id)` | Owning block ID. |
+| `plant_id` | `integer` | Foreign Key → `plants(plant_id)` | Owning plant ID. |
+| `rated_dc_kw` | `numeric` | | Inverter rated DC capacity in kW. |
+| `rated_ac_kw` | `numeric` | | Inverter rated AC output capacity in kW. |
 
-- **Code 0 (Normal)**: Generating without faults.
-- **Code 1 (Standby)**: Low solar irradiance or grid curtailment. **Excluded from zero-generation yield fault detection**.
-- **Code 2 (Warning)**: Minor operational alerts; continues power generation.
-- **Code 3 (Fault / Tripped)**: Severe hardware fault; generation halted.
-- **Code 4 (Offline)**: Inverter disconnected or non-responsive.
+#### `daily_inverter_telemetry`
+Daily generation metrics and health status aggregated per inverter.
+| Column Name | Data Type | Key / Constraint | Description |
+|---|---|---|---|
+| `log_date` | `date` | Composite PK | Date of operation. |
+| `inverter_id` | `character varying` | Composite PK, FK → `inverters` | Inverter identifier. |
+| `plant_id` | `integer` | FK → `plants(plant_id)` | Owning plant identifier. |
+| `peak_dc_power_kw` | `numeric` | | Maximum DC power logged during the day. |
+| `peak_ac_power_kw` | `numeric` | | Maximum AC power logged during the day. |
+| `total_daily_yield_kwh` | `numeric` | | Total daily energy produced in kilowatt-hours (kWh). |
+| `avg_dc_voltage_v` | `numeric` | | Average operating DC bus voltage. |
+| `avg_dc_current_a` | `numeric` | | Average operating DC current. |
+| `inverter_status_code` | `integer` | | Operational health code (0 = Normal, 1 = Standby, etc.). |
+
+#### `daily_weather_telemetry`
+Meteorological and environmental conditions logged at plant level.
+| Column Name | Data Type | Key / Constraint | Description |
+|---|---|---|---|
+| `log_date` | `date` | Composite PK | Date of measurement. |
+| `plant_id` | `integer` | Composite PK, FK → `plants` | Plant identifier. |
+| `peak_poa_irradiance_w_m2` | `numeric` | | Peak Plane-of-Array irradiance in W/m². |
+| `total_solar_radiation_kwh_m2` | `numeric` | | Daily cumulative insolation ($H$) in kWh/m². |
+| `avg_ambient_temp_c` | `numeric` | | Daily average ambient air temperature in °C. |
+| `max_module_temp_c` | `numeric` | | Daily maximum PV module temperature in °C. |
+| `soiling_ratio` | `numeric` | | Transmission factor (1.0 = pristine clean, <1.0 = soiled). |
+
+### 2.2 Operational Status Codes (`solar_agent/config/status_codes.yaml`)
+
+- **Code 0 (Normal)**: Operating normally without faults.
+- **Code 1 (Standby)**: Low solar irradiance or curtailment. Excluded from zero-generation fault counts.
+- **Code 2 (Warning)**: Minor operational alert (e.g. ambient warning); continues generating.
+- **Code 3 (Fault / Tripped)**: Inverter tripped on hardware fault; generation halted.
+- **Code 4 (Offline)**: Disconnected or non-communicating.
 
 ---
 
-## 3. Mathematical Metrics & Physics Engine
+## 3. Mathematical Metrics Engine
 
-All physics equations are implemented in `solar_agent/tools/metrics.py` as pure numpy/pandas calculations with zero external dependencies and zero LLM intervention.
+Implemented in `solar_agent/tools/metrics.py` as pure numerical calculations:
 
 ### 3.1 Performance Ratio ($PR$)
-$$PR = \frac{\sum Y_i}{\sum (P_{dc, i} \cdot H)}$$
-- **Insolation Threshold (BR-01)**: Days with solar insolation $H \le 0.5 \text{ kWh/m}^2$ are excluded to prevent asymptotic division anomalies during overcast/rainy conditions.
-- **Aggregation Invariant**: Block and Plant $PR$ are computed via pooled yield and capacity-weighted insolation sums—**never by taking the arithmetic average of child inverter $PR$ values**.
+$$PR = \frac{\sum \text{Yield}_i}{\sum (P_{dc, i} \cdot H)}$$
+- **Insolation Threshold**: Days with daily insolation $H \le 0.5 \text{ kWh/m}^2$ are excluded to prevent division distortions on dark/stormy days.
+- **Aggregation Invariant**: Block and Plant $PR$ are always computed via pooled yield and capacity-weighted insolation sums—never as an unweighted average of inverter PRs.
 
 ### 3.2 Specific Yield ($Y_f$)
 $$Y_f = \frac{\text{Yield (kWh)}}{P_{dc} \text{ (kW)}}$$
-Normalizes energy production across varying inverter and block capacities.
 
-### 3.3 Inverter Efficiency ($\eta$)
-$$\eta = \frac{P_{ac}}{P_{dc}}$$
-- Clamped between $0.0$ and $1.0$. Excludes sensor artifacts when $P_{dc} < 10 \text{ kW}$.
+### 3.3 Soiling Loss & Clean Yield
+$$\text{Soiling Energy Loss (kWh)} = \text{Yield} \cdot \left(\frac{1}{\text{soiling\_ratio}} - 1\right)$$
+$$\text{Clean Yield without Soiling (kWh)} = \text{Yield} + \text{Soiling Energy Loss}$$
+- Cleaning events are detected when day-over-day soiling ratio increases by $> 0.02$ ($2\%$).
 
-### 3.4 Soiling Loss ($L_s$)
-$$L_s = 1.0 - \text{soiling\_ratio}$$
-$$\text{Energy Lost (kWh)} = \text{Yield} \cdot \left(\frac{1}{\text{soiling\_ratio}} - 1\right)$$
-- Detects cleaning events when day-over-day soiling ratio increases by $\ge 2\%$.
-
-### 3.5 Peer Deviation (Weather-Agnostic Fault Detection)
-Compares each inverter's performance against its block peers on the exact same date using the **Median Absolute Deviation (MAD)** modified Z-score:
+### 3.4 Peer Deviation (Modified Z-Score MAD)
 $$M_i = \frac{0.6745 \cdot (PR_i - \text{median}(PR))}{\text{MAD}}$$
 $$\text{MAD} = \text{median}(|PR_i - \text{median}(PR)|)$$
-Because all inverters in a block experience identical irradiance, temperature, and cloud cover, weather variations cancel out completely, isolating true hardware degradation.
 
 ---
 
 ## 4. Security & Guardrails
 
 ### 4.1 SQL Security Guardrail (`solar_agent/tools/data_tools.py`)
+1. **Strict SELECT-Only Enforcement**: Rejects `INSERT`, `UPDATE`, `DELETE`, `DROP`, `TRUNCATE`, `ALTER`, `CREATE`, `GRANT`, `REVOKE`, `COPY`.
+2. **Table Allowlisting**: Access restricted strictly to `plants`, `blocks`, `inverters`, `daily_weather_telemetry`, `daily_inverter_telemetry`.
+3. **CTE Injection Prevention**: Validates Common Table Expressions (`WITH ...`).
+4. **Defense-in-Depth**: SQLAlchemy `@event.listens_for("before_cursor_execute")` hook blocks non-SELECT queries at driver level.
 
-Every database query generated by agents passes through an AST-based parser (`sqlglot`) before hitting PostgreSQL:
-
-1. **Strict SELECT-Only Enforcement**: Rejects `INSERT`, `UPDATE`, `DELETE`, `DROP`, `TRUNCATE`, `ALTER`, `CREATE`, `GRANT`, `REVOKE`, and `COPY`.
-2. **Table Allowlisting**: Restricts table access solely to `plants`, `blocks`, `inverters`, `daily_weather_telemetry`, and `daily_inverter_telemetry`. Prevents access to system schemas (`pg_user`, `pg_shadow`, `information_schema`).
-3. **CTE Injection Prevention**: Inspects Common Table Expressions to ensure malicious DML operations are not hidden within `WITH` statements.
-4. **Multi-Statement Blocking**: Rejects semicolon-delimited compound queries.
-5. **Runtime Bounds**: Enforces statement-level timeouts (15s) and row limits (50,000 rows max).
-6. **Defense-in-Depth**: `solar_agent/db/connection.py` includes a secondary SQLAlchemy `@event.listens_for("before_cursor_execute")` hook that rejects any non-SELECT SQL at the connection driver level.
-
-### 4.2 Dynamic Temporal Clamping
-To prevent querying non-existent future data, temporal filters automatically clamp "today" to:
-$$\text{Current Date} = \max(\text{log\_date})$$
-queried directly from the active telemetry database.
+### 4.2 Number-Grounding Verification (`solar_agent/graph/synthesizer.py` & `validator.py`)
+- The Synthesizer receives structured JSON metrics and data tables from tool outputs.
+- An automated validator extracts all numbers from the narrative response and tests that each number matches an upstream tool output within a 2% tolerance.
+- If ungrounded numbers are found, the synthesizer is re-prompted with explicit correction context. If grounding fails a second time, the system falls back to a deterministic markdown table of raw verified metrics.
 
 ---
 
-## 5. Multi-Agent System & Graph Pipeline
+## 5. Multi-Agent Pipeline & Provider Configuration
 
-### 5.1 Specialized Agent Roles
+### 5.1 Specialized Agent Architecture
+- **Data Agent**: Zero-LLM deterministic SQL execution.
+- **Performance Agent**: SingleCallAgent for KPIs, rankings, and comparisons.
+- **Environment Agent**: SingleCallAgent for soiling loss and weather regressions.
+- **Fault Agent**: ReAct agent for multi-step fault triage and anomaly correlation.
 
-| Agent | Architecture | Primary Tools | Role & Responsibility |
-|---|---|---|---|
-| **Data Agent** | **Deterministic (Zero-LLM)** | `execute_sql`, `fetch_plant_overview`, `fetch_inverter_data` | Directly executes data extraction without LLM overhead or latency. |
-| **Performance Agent**| **SingleCallAgent** | `compute_kpis_tool`, `rank_entities_tool`, `compare_periods_tool`, `trend_analysis_tool` | Computes PR, specific yields, rankings, and multi-period comparisons in a single structured call. |
-| **Environment Agent**| **SingleCallAgent** | `estimate_soiling_loss_tool`, `analyze_weather_correlation_tool` | Evaluates dust/soiling penalties, cleaning events, and temperature regression slopes. |
-| **Fault Agent** | **ReAct Loop Agent** | `detect_zero_generation_tool`, `detect_status_faults_tool`, `detect_peer_underperformance_tool`, `detect_anomalies_tool` | Multi-turn diagnostic agent that correlates fault streaks, peer deviations, and anomalies. |
-
-### 5.2 Orchestrator & DAG Execution
-- **DAG Generation**: The Orchestrator LLM translates natural queries into a structured Pydantic `Plan` composed of tasks with explicit dependencies (`dependencies: ["t1"]`).
-- **Cycle & Dependency Validation**: Uses Kahn's topological sort algorithm to validate the graph and split tasks into parallel execution layers.
-- **Parallel Dispatch**: The `Executor` runs all independent tasks in parallel using `ThreadPoolExecutor`.
-- **Reference Resolution**: Resolves upstream references dynamically (e.g., passing `$t1.data_ref` into downstream analysis tasks).
-
-### 5.3 In-Memory DataStore & Spillover (`solar_agent/graph/data_store.py`)
-- Telemetry DataFrames are kept in an in-memory key-value store using opaque handles (`df_xxxxxxxx`).
-- Tools take and return data handles, passing only lightweight summary dictionaries to LLM contexts, keeping context window usage minimal.
-- **Thread Safety**: Protected with `threading.RLock`.
-- **Parquet Disk Spillover**: Transparently writes large datasets to disk (`spill_to_parquet`) and reloads them on demand.
-
-### 5.4 Validator & Re-plan Routing
-The Validator inspects all completed `TaskResult` entries:
-- If all tasks succeed $\rightarrow$ routes to **Synthesizer**.
-- If any task fails and `replan_count < max_replan_loops` $\rightarrow$ routes to **Orchestrator** with failure context for plan revision.
-- If replan limit is exceeded $\rightarrow$ forces failover to Synthesizer to construct a best-effort partial answer.
-
-### 5.5 Synthesizer & Number-Grounding Verification
-The Synthesizer translates verified tool metrics into natural language:
-- **Grounding Check**: Parses every numerical quantity in the generated response and compares it against the tool metric outputs.
-- **2% Tolerance**: Permits acceptable rounding variations (e.g., `0.7842` $\rightarrow$ `78.4%` or `0.78`).
-- **Retry & Deterministic Fallback**: If ungrounded numbers are detected, the LLM is prompted to re-synthesize. If grounding fails again, the system falls back to a deterministic markdown table of verified metrics.
+### 5.2 Provider Configuration & Free-Tier Setup (Groq)
+Configured via `solar_agent/config/settings.py` and `.env`:
+- `LLM_PROVIDER`: Provider selector (`groq`, `gemini`, `anthropic`, `openai`, `ollama`).
+- `GROQ_API_KEY`: API key for Groq Cloud.
+- `LLM_PLANNER_MODEL`: Model for planning (default: `llama-3.3-70b-versatile`).
+- `LLM_AGENT_MODEL`: Model for agent tool selection (default: `llama-3.1-8b-instant`).
+- `LLM_SYNTH_MODEL`: Model for final narrative synthesis (default: `llama-3.3-70b-versatile`).
+- `LLM_MAX_RPM`: Rate limiter threshold (default: 20 RPM).
 
 ---
 
-## 6. Infrastructure & LLM Budget Engine
+## 6. Evaluation Benchmark Results
 
-### 6.1 Multi-Provider LLM Factory (`solar_agent/config/llm.py`)
-Provides `get_llm(role)` supporting:
-- **Roles**: `planner`, `agent`, `synthesizer`.
-- **Supported Providers**: Google Gemini (`gemini-3.8-flash`), Anthropic Claude (`claude-3-5-sonnet`), OpenAI (`gpt-4o`), and local Ollama (`llama3`).
-- **Lazy Imports**: Provider libraries (`google-genai`, `anthropic`, `openai`) are imported on-demand, preventing missing dependency crashes.
+Evaluated across the 25-question comprehensive benchmark set (`scripts/run_eval.py`):
 
-### 6.2 Thread-Safe Budget Isolation (`solar_agent/graph/budgeted_llm.py`)
-- **Query Budget**: Hard limit of 12 LLM calls per query (`settings.max_llm_calls_per_query`).
-- **Run ID Isolation**: Budget counters are keyed strictly by unique `run_id` (UUID generated per invocation), ensuring that sequential queries on the same thread or concurrent queries in parallel threads each receive a fresh, independent budget.
-- **Fail-Safe Partial Response**: If the budget is exhausted, `BudgetExceeded` is caught gracefully, and a partial summary of all completed tasks is returned without crashing.
-
----
-
-## 7. Verification & Test Suite Summary
-
-The repository maintains an automated test suite of **232 passing tests** across 12 test modules:
-
-| Test Module | Test Count | Key Features Covered |
-|---|---|---|
-| `test_metrics.py` | **39** | PR formulas, low-irradiance exclusion, aggregation invariants, soiling, MAD peer deviation. |
-| `test_orchestrator_executor.py`| **36** | DAG parsing, layer scheduling, ref resolution, replan routing, number grounding. |
-| `test_sql_guard.py` | **31** | DML/DDL rejection, table allowlists, CTE injection, semicolon compound injection. |
-| `test_dag_validation.py` | **30** | Kahn's algorithm, cycle detection, invalid dependencies, layer grouping. |
-| `test_agents.py` | **21** | SingleCallAgent handling, malformed JSON recovery, ReAct loops, zero-LLM data execution. |
-| `test_llm_factory.py` | **16** | Multi-provider dispatch, role configuration, fallback defaults, lazy import isolation. |
-| `test_performance_tools.py` | **14** | KPI aggregation, multi-plant keying, ranking, trend analysis, period comparisons. |
-| `test_environment_tools.py` | **14** | Soiling losses, cleaning event detection, module temp vs PR regression. |
-| `test_fault_tools.py` | **12** | Zero-gen detection, standby exclusions, hardware fault streaks, peer anomalies. |
-| `test_budget.py` | **9** | Run ID isolation, thread safety, budget exhaustion partial recovery, worst-case limits. |
-| `test_golden.py` | **5** | End-to-end golden evaluation queries with cached replay responses. |
-| `test_executor.py` | **5** | Layer scheduling, transient retry, fail-fast on HTTP 429 quota exhaustion. |
-| **Total Passing Tests** | **232** | **100% Passing (0 failures, 0 errors)** |
+| Evaluation Dimension | Score | Description |
+|:---|:---:|:---|
+| **Intent Match** | **1.00 (100%)** | Correct intent classification across all 25 queries |
+| **Tools Match** | **0.78 (78%)** | Fraction of expected domain tools scheduled in DAG plan |
+| **Numbers Grounded** | **0.68 (68%)** | Fraction of ground-truth target numbers found in answer |
+| **Unexpected Numbers** | **0.99 (99%)** | Answers free of hallucinated or fabricated metrics |
+| **Overall Score** | **86.30%** | **PASS (Benchmark Threshold: 70%)** |
 
 ---
 
-## 8. Directory & File Reference
+## 7. Known Limitations
 
-```
-solar Power Plant analysis/
-├── PROJECT_DOCUMENTATION.md            ← Master comprehensive technical document
-├── README.md                           ← Getting started & architecture overview
-├── conftest.py                         ← Pytest configuration & path registration
-├── pyproject.toml                      ← Test markers, asyncio, and linting settings
-├── requirements.txt                    ← Pinned project dependencies
-├── scripts/
-│   ├── derive_expected_values.py       ← Ground-truth SQL derivation script
-│   ├── run_eval.py                     ← Evaluation harness (accuracy, latency, tokens)
-│   └── rerecord.py                     ← LLM cache recording utility
-└── solar_agent/
-    ├── eval_set.json                   ← Golden evaluation query benchmark set
-    ├── state.py                        ← Pydantic schemas, Task, Plan, AgentState
-    ├── config/
-    │   ├── llm.py                      ← Multi-provider LLM role factory (get_llm)
-    │   ├── settings.py                 ← Configuration thresholds & environment variables
-    │   ├── semantic_layer.yaml         ← Database schema metadata & business rules
-    │   └── status_codes.yaml           ← Inverter operational status definitions
-    ├── db/
-    │   ├── connection.py               ← Sync/async engine factories with query guards
-    │   └── queries.py                  ← Parameterized SQL query templates
-    ├── tools/
-    │   ├── metrics.py                  ← Pure mathematical KPI calculation engine
-    │   ├── data_tools.py               ← AST SQL guardrail & 6 LangChain data tools
-    │   ├── performance_tools.py        ← KPI aggregation, ranking, period comparison
-    │   ├── fault_tools.py              ← Zero-gen, peer deviation, hardware streaks
-    │   └── environment_tools.py        ← Soiling calculations & regression analysis
-    ├── agents/
-    │   ├── base_agent.py               ← BaseAgent, ReActAgent, SingleCallAgent
-    │   ├── data_agent.py               ← Zero-LLM deterministic SQL execution agent
-    │   ├── performance_agent.py        ← SingleCallAgent for performance analytics
-    │   ├── environment_agent.py        ← SingleCallAgent for environmental diagnostics
-    │   └── fault_agent.py              ← ReAct loop agent for exploratory fault diagnosis
-    ├── graph/
-    │   ├── graph.py                    ← LangGraph StateGraph pipeline assembly
-    │   ├── orchestrator.py             ← DAG planning & replan reasoning
-    │   ├── executor.py                 ← Parallel topological layer scheduler
-    │   ├── validator.py                ← Task completion & integrity validation
-    │   ├── synthesizer.py              ← Synthesis with number-grounding verification
-    │   ├── budgeted_llm.py             ← Thread-safe, run-isolated call budget wrapper
-    │   ├── data_store.py               ← In-memory thread-safe DataFrame repository
-    │   └── llm_recorder.py             ← ReplayLLM test recording and playback cache
-    └── tests/                          ← 232 automated tests
-```
-
----
-
-## 9. Recent Development Milestones
-
-1. **Deterministic Single-Call & Zero-LLM Architecture**: Migrated `DataAgent` to zero-LLM execution and `PerformanceAgent` / `EnvironmentAgent` to `SingleCallAgent`, slashing API token consumption and eliminating non-deterministic errors.
-2. **Multi-Plant Metrics Disambiguation**: Updated `compute_kpis_tool` to key metrics by distinct plant IDs, ensuring multi-plant comparative queries produce isolated, accurate data streams.
-3. **Thread-Safe Run ID Budget Isolation**: Refactored `BudgetedLLM` to key call counts by per-invocation UUID `run_id` with shared `threading.Lock`, guaranteeing isolation across concurrent queries.
-4. **SQL Ground Truth Alignment**: Implemented `scripts/derive_expected_values.py` to establish reproducible mathematical ground truths in `eval_set.json` referencing `status_codes.yaml`.
-5. **Full Test Suite Restoration & Pass**: Validated complete 232-test suite with zero regressions.
-6. **Git History & Contribution Alignment**: Corrected commit author credentials to match GitHub user profile across all historical commits and synchronized with `origin/main`.
+1. **Temporal Coverage**: The telemetry database currently covers **2026-08-01 through 2026-09-26** (57 operational days). Queries requesting dates outside this range will receive data bounded to this window with an explicit assumption disclosure.
+2. **Synthetic Telemetry**: The dataset is synthetically generated using physical PV yield formulas, realistic irradiance profiles, and simulated inverter fault events for reproducible benchmarking.
+3. **No Predictive Forecasting**: The system evaluates historical operational telemetry. Future date forecasts (e.g., "predict tomorrow's yield") are explicitly declared out of scope by the planner.
+4. **Free-Tier LLM Rate Limits**: When operating on free Groq Cloud API tiers (e.g. 6,000 TPM limit), bursts of consecutive queries can hit HTTP 429 rate limits. The system uses exponential backoff and provides an offline replay cache (`llm_cache.json`) for instant, offline local demonstration and testing.
+5. **Unsupported Query Domains**:
+   - Power quality, harmonics, or sub-second grid frequency transient analysis.
+   - PPA financial billing, dynamic feed-in tariffs, and revenue forecasting.
+   - Sub-daily / real-time SCADA sensor streams (telemetry is daily-aggregated).
+   - Maintenance work order ticketing system integration.

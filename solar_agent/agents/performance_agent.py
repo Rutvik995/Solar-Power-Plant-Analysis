@@ -13,7 +13,8 @@ Allowed tools: compute_kpis_tool, rank_entities_tool, compare_periods_tool, tren
 from __future__ import annotations
 
 from langchain_core.tools import tool
-from pydantic import BaseModel, ConfigDict, Field
+from typing import Optional
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from solar_agent.agents.base_agent import SingleCallAgent
 from solar_agent.prompts.agent_prompts import PERFORMANCE_AGENT_PROMPT
@@ -28,8 +29,16 @@ from solar_agent.tools.performance_tools import (
 class ComputeKpisSchema(BaseModel):
     model_config = ConfigDict(extra="ignore", populate_by_name=True)
     data_ref: str
-    level: str = Field(default="plant", alias="aggregation_level")
-    period: str = Field(default="total", alias="time_period")
+    level: Optional[str] = Field(default="plant", alias="aggregation_level")
+    period: Optional[str] = Field(default="total", alias="time_period")
+
+    @model_validator(mode="after")
+    def _coerce_none(self) -> "ComputeKpisSchema":
+        if not self.level:
+            self.level = "plant"
+        if not self.period:
+            self.period = "total"
+        return self
 
 
 @tool(args_schema=ComputeKpisSchema)

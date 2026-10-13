@@ -3,7 +3,7 @@ testpaths = ["solar_agent/tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
-addopts = "-v --tb=short"
+addopts = "-v --tb=short -m 'not integration'"
 asyncio_mode = "auto"
 markers = [
     "integration: mark test as integration test requiring live DB and LLM",

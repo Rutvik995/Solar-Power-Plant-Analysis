@@ -154,14 +154,24 @@ def build_graph(llm: Any = None, checkpointer=None, mode: str = "live", cache_na
     counters: dict[str, int] = {}
     lock = threading.Lock()
 
+    # ONE shared ReplayLLM cache — all roles read/write the same dict so saves
+    # never overwrite each other's entries.
+    if not isinstance(llm, ReplayLLM):
+        shared_recorder = ReplayLLM(fallback_llm=None, mode=mode, cache_name=cache_name)
+    else:
+        shared_recorder = llm  # test-injected ReplayLLM already has its cache
+
     def _build_role(role: str) -> BudgetedLLM:
         raw_llm = llm if llm is not None else get_llm(role)
         # Only wrap in ReplayLLM if it's not already a ReplayLLM (some tests pass one)
         if not isinstance(raw_llm, ReplayLLM):
             recorded = ReplayLLM(fallback_llm=raw_llm, mode=mode, cache_name=cache_name)
+            # CRITICAL: share the same in-memory cache dict so all roles see each
+            # other's new entries and the last _save() writes the complete picture.
+            recorded.cache = shared_recorder.cache
         else:
             recorded = raw_llm
-            
+
         return BudgetedLLM(
             inner_llm=recorded,
             budget=settings.max_llm_calls_per_query,

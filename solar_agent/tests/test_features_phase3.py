@@ -221,7 +221,7 @@ class TestFollowUpScopeInheritance:
         mock_llm.bind_tools.return_value = mock_llm
         mock_llm.invoke.side_effect = _mock_llm_call
 
-        graph = build_graph(llm=mock_llm, checkpointer=checkpointer)
+        graph = build_graph(llm=mock_llm, checkpointer=checkpointer, mode="passthrough")
         config = {"configurable": {"thread_id": "thread-solar-followup"}}
 
         # Query 1

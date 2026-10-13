@@ -24,6 +24,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 from langchain_core.tools import BaseTool
 
 from solar_agent.state import TaskResult, TaskStatus, BudgetExceeded
+from solar_agent.graph.llm_recorder import CacheMissError
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +96,9 @@ class BaseSpecialistAgent:
                                 tool_calls_made=tool_calls_made,
                                 latency_ms=(time.monotonic() - t_start) * 1000,
                             )
+                    elif isinstance(exc, CacheMissError):
+                        logger.info("Agent '%s' cache miss in replay mode; breaking to execute tools directly", self.name)
+                        break
                     else:
                         raise
 
@@ -105,7 +109,15 @@ class BaseSpecialistAgent:
 
                 for tc in response.tool_calls:
                     tool_name = tc["name"]
-                    tool_args = tc["args"]
+                    tool_args = dict(tc["args"]) if isinstance(tc["args"], dict) else tc["args"]
+                    from solar_agent.graph.data_store import DataStore
+                    if isinstance(tool_args, dict) and inputs.get("data_ref"):
+                        if (
+                            not tool_args.get("data_ref")
+                            or tool_args.get("data_ref") in ("<data_ref>", "df_ref")
+                            or DataStore.get(tool_args.get("data_ref")) is None
+                        ):
+                            tool_args["data_ref"] = inputs["data_ref"]
                     tool_calls_made.append(tool_name)
                     logger.debug(
                         "Agent '%s' calling tool '%s' with %s", self.name, tool_name, tool_args
@@ -375,11 +387,53 @@ class SingleCallAgent:
         human_text = "\n".join(human_parts)
 
         try:
-            # --- LLM call: ask it to pick a tool ---
-            response = self._llm.invoke(
-                [self._system_msg, HumanMessage(content=human_text)],
-                run_id=run_id,
-            )
+            selection = None
+            try:
+                # --- LLM call: ask it to pick a tool ---
+                response = self._llm.invoke(
+                    [self._system_msg, HumanMessage(content=human_text)],
+                    run_id=run_id,
+                )
+            except CacheMissError:
+                logger.info("SingleCallAgent[%s] CacheMiss in replay; inferring tool from description", task_id)
+                desc_l = description.lower()
+                tool_names = list(self._tool_map.keys())
+                if any(w in desc_l for w in ["soiling", "dust", "dirt", "wash"]):
+                    chosen_tool = "estimate_soiling_loss_tool"
+                elif any(w in desc_l for w in ["weather", "correlation", "irradiance vs"]):
+                    chosen_tool = "analyze_weather_correlation_tool"
+                elif any(w in desc_l for w in ["rank", "best", "worst", "highest", "lowest"]) and "rank_entities_tool" in tool_names:
+                    chosen_tool = "rank_entities_tool"
+                elif "compare" in desc_l and "compare_periods_tool" in tool_names:
+                    chosen_tool = "compare_periods_tool"
+                elif any(w in desc_l for w in ["trend", "rolling", "moving average"]) and "trend_analysis_tool" in tool_names:
+                    chosen_tool = "trend_analysis_tool"
+                elif "compute_kpis_tool" in tool_names:
+                    chosen_tool = "compute_kpis_tool"
+                else:
+                    chosen_tool = tool_names[0]
+
+                if chosen_tool in ("estimate_soiling_loss_tool", "analyze_weather_correlation_tool"):
+                    t_args = {"data_ref": inputs.get("data_ref")}
+                elif chosen_tool == "rank_entities_tool":
+                    metric = "performance_ratio"
+                    if "yield" in desc_l:
+                        metric = "total_daily_yield_kwh"
+                    t_args = {"data_ref": inputs.get("data_ref"), "metric": metric}
+                elif chosen_tool == "trend_analysis_tool":
+                    metric = "performance_ratio"
+                    if "yield" in desc_l:
+                        metric = "total_daily_yield_kwh"
+                    t_args = {"data_ref": inputs.get("data_ref"), "metric": metric}
+                else:
+                    lvl = "inverter" if "inverter" in desc_l else "block" if "block" in desc_l else "plant"
+                    t_args = {"data_ref": inputs.get("data_ref"), "level": lvl, "period": "total"}
+
+                selection = {
+                    "tool": chosen_tool,
+                    "args": t_args,
+                }
+                response = None
 
             def _extract_selection(resp: Any) -> dict:
                 # 1. Check if tool_calls were emitted by ChatGroq
@@ -422,36 +476,37 @@ class SingleCallAgent:
                             return res
                     raise
 
-            try:
-                selection = _extract_selection(response)
-            except Exception as parse_err:
-                logger.warning(
-                    "SingleCallAgent[%s] malformed JSON from LLM: %s. Retrying with reminder...",
-                    task_id, parse_err,
-                )
-                retry_messages = [
-                    self._system_msg,
-                    HumanMessage(content=human_text),
-                    AIMessage(content=getattr(response, "content", "") if response is not None else ""),
-                    HumanMessage(
-                        content="Your previous response was not valid JSON. Please return valid JSON only matching the schema: {\"tool\": \"<tool_name>\", \"args\": {<args>}}"
-                    ),
-                ]
+            if selection is None:
                 try:
-                    retry_resp = self._llm.invoke(retry_messages, run_id=run_id)
-                    selection = _extract_selection(retry_resp)
-                except Exception as retry_err:
-                    logger.error(
-                        "SingleCallAgent[%s] malformed JSON from LLM after retry: %s",
-                        task_id, retry_err,
+                    selection = _extract_selection(response)
+                except Exception as parse_err:
+                    logger.warning(
+                        "SingleCallAgent[%s] malformed JSON from LLM: %s. Retrying with reminder...",
+                        task_id, parse_err,
                     )
-                    return TaskResult(
-                        task_id=task_id,
-                        status=TaskStatus.FAILED,
-                        error=f"Malformed JSON from LLM: {retry_err}",
-                        tool_calls_made=tool_calls_made,
-                        latency_ms=(time.monotonic() - t_start) * 1000,
-                    )
+                    retry_messages = [
+                        self._system_msg,
+                        HumanMessage(content=human_text),
+                        AIMessage(content=getattr(response, "content", "") if response is not None else ""),
+                        HumanMessage(
+                            content="Your previous response was not valid JSON. Please return valid JSON only matching the schema: {\"tool\": \"<tool_name>\", \"args\": {<args>}}"
+                        ),
+                    ]
+                    try:
+                        retry_resp = self._llm.invoke(retry_messages, run_id=run_id)
+                        selection = _extract_selection(retry_resp)
+                    except Exception as retry_err:
+                        logger.error(
+                            "SingleCallAgent[%s] malformed JSON from LLM after retry: %s",
+                            task_id, retry_err,
+                        )
+                        return TaskResult(
+                            task_id=task_id,
+                            status=TaskStatus.FAILED,
+                            error=f"Malformed JSON from LLM: {retry_err}",
+                            tool_calls_made=tool_calls_made,
+                            latency_ms=(time.monotonic() - t_start) * 1000,
+                        )
 
             tool_name = selection.get("tool", "")
             tool_args = selection.get("args", {})
@@ -460,8 +515,20 @@ class SingleCallAgent:
                     tool_args["level"] = tool_args.pop("aggregation_level")
                 if "time_period" in tool_args and "period" not in tool_args:
                     tool_args["period"] = tool_args.pop("time_period")
-                if not tool_args.get("data_ref") and inputs.get("data_ref"):
+                from solar_agent.graph.data_store import DataStore
+                if inputs.get("data_ref") and (
+                    not tool_args.get("data_ref")
+                    or tool_args.get("data_ref") in ("<data_ref>", "df_ref")
+                    or DataStore.get(tool_args.get("data_ref")) is None
+                ):
                     tool_args["data_ref"] = inputs["data_ref"]
+                if tool_name == "estimate_soiling_loss_tool":
+                    tool_args = {"data_ref": tool_args.get("data_ref", inputs.get("data_ref"))}
+                elif tool_name == "rank_entities_tool":
+                    tool_args = {
+                        k: v for k, v in tool_args.items()
+                        if k in ("data_ref", "metric", "ascending", "top_n")
+                    }
 
             # ── unknown tool → return FAILED immediately (item 5) ──
             tool = self._tool_map.get(tool_name)

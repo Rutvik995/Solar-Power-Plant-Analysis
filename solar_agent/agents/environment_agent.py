@@ -10,6 +10,8 @@ Allowed tools: estimate_soiling_loss_tool, analyze_weather_correlation_tool
 
 from __future__ import annotations
 
+from typing import Any
+
 from langchain_core.tools import tool
 from pydantic import BaseModel, ConfigDict
 
@@ -40,8 +42,15 @@ def estimate_soiling_loss_tool(data_ref: str) -> dict:
 
 
 class AnalyzeWeatherCorrelationSchema(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    data_ref: str
+    model_config = ConfigDict(extra="ignore")
+    data_ref: str = ""
+    performance_ref: str | None = None
+    weather_ref: str | None = None
+    pr_ref: str | None = None
+
+    def model_post_init(self, __context: Any) -> None:
+        if not self.data_ref:
+            self.data_ref = self.performance_ref or self.weather_ref or self.pr_ref or ""
 
 @tool(args_schema=AnalyzeWeatherCorrelationSchema)
 def analyze_weather_correlation_tool(data_ref: str) -> dict:

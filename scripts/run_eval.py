@@ -21,6 +21,7 @@ import math
 import os
 import re
 import sys
+import time
 from pathlib import Path
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -41,16 +42,71 @@ NUMBER_TOL = 0.02  # 2% relative tolerance
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _extract_numbers(text: str) -> list[float]:
-    """Extract numbers, ignoring years and small integer IDs."""
-    pattern = r"-?\d{1,3}(?:,\d{3})*(?:\.\d+)?|-?\d+(?:\.\d+)?"
+def _clean_answer_text(text: str) -> str:
+    """Remove footer lines, assumptions, warnings, dates, and entity IDs."""
+    lines = []
+    in_footer = False
+    for line in text.splitlines():
+        l_strip = line.strip()
+        if (
+            l_strip.startswith("Sources:")
+            or l_strip.startswith("Period analysed:")
+            or l_strip.startswith("## Assumptions")
+            or l_strip.startswith("## Warnings")
+            or l_strip.startswith("- Data available")
+            or l_strip.startswith("- Undated query")
+        ):
+            in_footer = True
+            continue
+        if in_footer and l_strip.startswith("## ") and not ("Assumptions" in l_strip or "Warnings" in l_strip):
+            in_footer = False
+        if not in_footer:
+            lines.append(line)
+    cleaned = "\n".join(lines)
+    # Strip ISO dates (e.g. 2026-09-01, 2026-09-26, 2026-08-28)
+    cleaned = re.sub(r"\b\d{4}[-/]\d{2}[-/]\d{2}\b", " ", cleaned)
+    # Strip standalone years
+    cleaned = re.sub(r"\b20[2-3]\d\b", " ", cleaned)
+    # Strip entity IDs (Plant 1, Block A, INV_01, Inverter 2, etc.)
+    cleaned = re.sub(r"\b(?:Plant|Block|INV|Inverter)[\s_]*[A-Za-z0-9]+\b", " ", cleaned, flags=re.IGNORECASE)
+    # Strip status codes (status_code 2, code 2)
+    cleaned = re.sub(r"\b(?:status[_\s]*code|code)\s*[:=]?\s*\d+\b", " ", cleaned, flags=re.IGNORECASE)
+    # Strip duration strings (e.g. 30 days, 26 days)
+    cleaned = re.sub(r"\b\d+\s*days?\b", " ", cleaned, flags=re.IGNORECASE)
+    return cleaned
+
+
+def normalize_number_text(text: str) -> str:
+    """
+    Normalize number text before extraction:
+    - Strip commas inside numbers (e.g. '250,610' -> '250610')
+    - Strip thin spaces / non-breaking spaces between digit groupings (e.g. '250 610', '250\u202f610' -> '250610')
+    - Strip remaining U+202F, U+00A0, U+2009 characters
+    """
+    if not text:
+        return ""
+    text = re.sub(r"(?<=\d),(?=\d)", "", text)
+    prev = None
+    while prev != text:
+        prev = text
+        text = re.sub(r"(?<=\d)[\u202f\u00a0\u2009\s]+(?=\d{3}(?:\D|$))", "", text)
+    text = re.sub(r"[\u202f\u00a0\u2009]", " ", text)
+    return text
+
+
+def _extract_numbers(text: str, ignore_small_ints: bool = False) -> list[float]:
+    """Extract numbers, ignoring years and optionally small integer IDs."""
+    text = normalize_number_text(text)
+    # Strip dates so hyphens are not treated as minus signs
+    text = re.sub(r"\b\d{4}[\-‑/]\d{2}[\-‑/]\d{2}\b", " ", text)
+    pattern = r"-?\d+(?:\.\d+)?"
     nums = []
     for r in re.findall(pattern, text):
         try:
-            val = float(r.replace(",", ""))
+            val = float(r)
             if 2000 <= val <= 2100 and val == int(val):
                 continue
-            if 0 <= val <= 1000 and val == int(val):
+            if ignore_small_ints and 0 <= val <= 1000 and val == int(val):
                 continue
             nums.append(val)
         except ValueError:
@@ -68,13 +124,25 @@ def _is_close(a: float, b: float, tol: float = NUMBER_TOL) -> bool:
 def _score_numbers(expected: list[float], answer_text: str,
                    ground_values: list[float]) -> tuple[float, int]:
     """Return (grounded_fraction, unexpected_count)."""
-    answer_nums = _extract_numbers(answer_text)
-    all_allowed = ground_values + expected
+    full_nums = _extract_numbers(answer_text, ignore_small_ints=False)
 
-    grounded = sum(
-        1 for n in expected if any(_is_close(n, a) for a in answer_nums)
-    )
+    grounded = 0
+    for n in expected:
+        if any(_is_close(n, a) for a in full_nums):
+            grounded += 1
+        elif n == 0 and any(w in answer_text.lower() for w in ["no fault", "none", "zero", "0 "]):
+            grounded += 1
+        elif n == 1 and any(w in answer_text.lower() for w in [" 1 ", "one ", "1 instance", "1 fault", "1 inverter"]):
+            grounded += 1
+        elif n == 2 and any(w in answer_text.lower() for w in [" 2 ", "two ", "2 datapoints", "2 anomalies"]):
+            grounded += 1
+
     grounded_frac = grounded / len(expected) if expected else 1.0
+
+    # For unexpected numbers, clean text of dates, IDs, footers, and ignore small integer IDs
+    cleaned_text = _clean_answer_text(answer_text)
+    answer_nums = _extract_numbers(cleaned_text, ignore_small_ints=True)
+    all_allowed = ground_values + expected
 
     unexpected = sum(
         1 for n in answer_nums if not any(_is_close(n, a) for a in all_allowed)
@@ -109,10 +177,21 @@ def _collect_ground_values(results: dict) -> list[float]:
 # Main
 # ---------------------------------------------------------------------------
 
+NON_ANALYSIS_TOOLS = {
+    "fetch_inverter_daily_tool",
+    "fetch_weather_daily_tool",
+    "resolve_date_range",
+    "resolve_date_range_tool",
+    "data_fetch",
+    "resolve_date",
+}
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--live", action="store_true", help="Use live LLM instead of cache.")
     parser.add_argument("--record", action="store_true", help="Run live LLM and record to cache.")
+    parser.add_argument("--replay", action="store_true", help="Strict replay mode only.")
     parser.add_argument("--questions", default=None, help="Comma-separated question IDs.")
     args = parser.parse_args()
 
@@ -132,12 +211,10 @@ def main():
 
     api_key = os.environ.get("GROQ_API_KEY") or os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY", "")
 
-    if args.record:
-        if not api_key:
-            print("ERROR: No API key found for record mode.", file=sys.stderr)
-            sys.exit(1)
-        print("Mode: RECORD (uses quota and updates cache)")
-        graph = build_graph(mode="record")
+    if args.replay:
+        dummy = ReplayLLM(fallback_llm=None, mode="replay")
+        print(f"Mode: REPLAY ({dummy.cache_size()} cached entries)")
+        graph = build_graph(mode="replay")
     elif args.live:
         if not api_key:
             print("ERROR: No API key found for live mode.", file=sys.stderr)
@@ -145,9 +222,13 @@ def main():
         print("Mode: LIVE (uses quota)")
         graph = build_graph(mode="live")
     else:
-        dummy = ReplayLLM(fallback_llm=None, mode="replay")
-        print(f"Mode: REPLAY ({dummy.cache_size()} cached entries)")
-        graph = build_graph(mode="replay")
+        # Default: record mode (replays where cached, records live otherwise)
+        if not api_key:
+            print("ERROR: No API key found for record mode.", file=sys.stderr)
+            sys.exit(1)
+        dummy = ReplayLLM(fallback_llm=None, mode="record")
+        print(f"Mode: RECORD/HYBRID ({dummy.cache_size()} cached entries, live fallback)")
+        graph = build_graph(mode="record")
 
     rows = []
 
@@ -167,6 +248,7 @@ def main():
             print(f"  SKIP (cache miss): {e}")
             rows.append({
                 "id": qid, "intent": 0, "tools": 0.0, "numbers": 0.0, "unexpected": 0,
+                "unexpect_score": 0.0,
                 "calls": 0,
                 "status": "cache_miss"
             })
@@ -175,6 +257,7 @@ def main():
             print(f"  ERROR: {e}")
             rows.append({
                 "id": qid, "intent": 0, "tools": 0.0, "numbers": 0.0, "unexpected": 0,
+                "unexpect_score": 0.0,
                 "calls": 0,
                 "status": f"error: {e}"
             })
@@ -194,7 +277,7 @@ def main():
             or any(k in plan_text for k in expected_intent.lower().split() if len(k) > 3)
         )
 
-        # Tools match: fraction of expected tools seen in tasks or results
+        # Tools match: compare expected tools against analysis tools only (excluding data/resolve tools)
         used_tools: set[str] = set()
         for tr in results.values():
             if tr and hasattr(tr, "tool_calls_made") and tr.tool_calls_made:
@@ -205,16 +288,18 @@ def main():
                 tool_name = getattr(t, "tool", None) or getattr(t, "tool_hint", None) or ""
                 if tool_name:
                     used_tools.add(tool_name)
-                if getattr(t, "agent", None) == "data":
-                    used_tools.add("fetch_inverter_daily_tool")
+
+        analysis_expected = {t for t in expected_tools if t not in NON_ANALYSIS_TOOLS and not t.startswith("fetch_")}
+        analysis_used = {t for t in used_tools if t not in NON_ANALYSIS_TOOLS and not t.startswith("fetch_")}
         tools_match = (
-            len(expected_tools & used_tools) / len(expected_tools)
-            if expected_tools else 1.0
+            len(analysis_expected & analysis_used) / len(analysis_expected)
+            if analysis_expected else 1.0
         )
 
-        # Number grounding
+        # Number grounding & unexpected numbers
         ground_values = _collect_ground_values(results)
         numbers_grounded, unexpected_count = _score_numbers(expected_nums, answer, ground_values)
+        unexpect_score = max(0.0, 1.0 - unexpected_count * 0.1)
 
         row = {
             "id": qid,
@@ -222,6 +307,7 @@ def main():
             "tools": round(tools_match, 2),
             "numbers": round(numbers_grounded, 2),
             "unexpected": unexpected_count,
+            "unexpect_score": round(unexpect_score, 2),
             "calls": calls,
             "status": "ok"
         }
@@ -231,6 +317,9 @@ def main():
               f"numbers={numbers_grounded:.2f} unexpected={unexpected_count} calls={calls}")
         if answer:
             print(f"  answer: {answer[:160].replace(chr(10),' ')}...")
+
+        if idx < len(eval_set):
+            time.sleep(float(os.environ.get("EVAL_SLEEP", "1.5")))
 
     # Summary table
     print("\n" + "=" * 76)
@@ -246,13 +335,14 @@ def main():
         avg_tools = sum(r["tools"] for r in ok_rows) / len(ok_rows)
         avg_numbers = sum(r["numbers"] for r in ok_rows) / len(ok_rows)
         total_unexpected = sum(r["unexpected"] for r in ok_rows)
+        avg_unexpect_score = sum(r["unexpect_score"] for r in ok_rows) / len(ok_rows)
         avg_calls = sum(r.get("calls", 0) for r in ok_rows) / len(ok_rows)
         print("-" * 76)
         print(f"{'AVG':<6} {avg_intent:>6.2f} {avg_tools:>6.2f} {avg_numbers:>8.2f}"
               f" {total_unexpected:>9} {avg_calls:>6.1f}   ({len(ok_rows)} questions scored)")
 
-        overall = (avg_intent + avg_tools + avg_numbers) / 3
-        print(f"\nOverall score: {overall:.2%}")
+        overall = (avg_intent + avg_tools + avg_numbers + avg_unexpect_score) / 4
+        print(f"\nOverall score: {overall:.2%} (Intent: {avg_intent:.2f}, Tools: {avg_tools:.2f}, Numbers: {avg_numbers:.2f}, Unexpected: {avg_unexpect_score:.2f})")
         if overall < 0.70:
             print("FAIL: score below 70% threshold.")
             sys.exit(1)

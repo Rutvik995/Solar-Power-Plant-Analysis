@@ -33,16 +33,37 @@ MAX_REPLANS = 2  # hard cap on re-planning loops (also in settings, kept here fo
 NUMBER_TOLERANCE = 0.02  # 2% relative tolerance for number-grounding check
 
 
+def normalize_number_text(text: str) -> str:
+    """
+    Normalize number text before extraction:
+    - Strip commas inside numbers (e.g. '250,610' -> '250610')
+    - Strip thin spaces / non-breaking spaces between digit groupings (e.g. '250 610', '250\u202f610' -> '250610')
+    - Strip remaining U+202F, U+00A0, U+2009 characters
+    """
+    if not text:
+        return ""
+    text = re.sub(r"(?<=\d),(?=\d)", "", text)
+    prev = None
+    while prev != text:
+        prev = text
+        text = re.sub(r"(?<=\d)[\u202f\u00a0\u2009\s]+(?=\d{3}(?:\D|$))", "", text)
+    text = re.sub(r"[\u202f\u00a0\u2009]", " ", text)
+    return text
+
+
 def _extract_numbers(text: str) -> list[float]:
     """
     Extract numeric values. Ignores years/dates and small integers likely to be IDs/labels.
     """
-    pattern = r"-?\d{1,3}(?:,\d{3})*(?:\.\d+)?|-?\d+(?:\.\d+)?"
+    text = normalize_number_text(text)
+    # Strip dates so hyphens are not treated as minus signs
+    text = re.sub(r"\b\d{4}[\-‑/]\d{2}[\-‑/]\d{2}\b", " ", text)
+    pattern = r"-?\d+(?:\.\d+)?"
     raw = re.findall(pattern, text)
     nums = []
     for r in raw:
         try:
-            val = float(r.replace(",", ""))
+            val = float(r)
             # Ignore years 2000-2100
             if 2000 <= val <= 2100 and val.is_integer():
                 continue

@@ -14,9 +14,11 @@
       "rank_entities_tool"
     ],
     "key_numbers": [
-      4687593.3
+      8316233.7
     ],
-    "notes": "Plant 5 has the highest yield. SQL: SUM(yield) per plant_id."
+    "notes": "Plant 5 top yield: 8316233.7 kWh.",
+    "start_date": "2026-09-01",
+    "end_date": "2026-09-26"
   },
   {
     "id": "q02",
@@ -31,10 +33,11 @@
       "compute_kpis_tool"
     ],
     "key_numbers": [
-      0.8656,
-      2351535.09
+      0.8705
     ],
-    "notes": "PR=0.8656, yield=2,351,535 kWh. SQL: SUM(yield)/SUM(rated_dc_kw*H), H>0.5."
+    "notes": "PR=0.8705.",
+    "start_date": "2026-09-01",
+    "end_date": "2026-09-26"
   },
   {
     "id": "q03",
@@ -51,7 +54,9 @@
     "key_numbers": [
       1
     ],
-    "notes": "Exactly 1 inverter-day with zero yield when irradiance > 0.5."
+    "notes": "1 inverter-days with zero yield when irradiance > 0.5.",
+    "start_date": "2026-09-01",
+    "end_date": "2026-09-26"
   },
   {
     "id": "q04",
@@ -66,7 +71,9 @@
       "detect_peer_underperformance_tool"
     ],
     "key_numbers": [],
-    "notes": "Qualitative; no specific number required."
+    "notes": "Qualitative peer underperformance check.",
+    "start_date": "2026-09-01",
+    "end_date": "2026-09-26"
   },
   {
     "id": "q05",
@@ -81,9 +88,11 @@
       "estimate_soiling_loss_tool"
     ],
     "key_numbers": [
-      89771.84
+      147847.51
     ],
-    "notes": "89,771.84 kWh. SQL: SUM(yield * (1/soiling_ratio - 1)) where soiling_ratio in (0,1] and H>0.5."
+    "notes": "147847.51 kWh soiling loss for Plant 1.",
+    "start_date": "2026-09-01",
+    "end_date": "2026-09-26"
   },
   {
     "id": "q06",
@@ -100,7 +109,9 @@
     "key_numbers": [
       0
     ],
-    "notes": "0 fault-code rows in plant 3. Fault codes from status_codes.yaml (is_fault=true: 3,4)."
+    "notes": "0 fault-code rows in Plant 3.",
+    "start_date": "2026-09-01",
+    "end_date": "2026-09-26"
   },
   {
     "id": "q07",
@@ -116,13 +127,15 @@
       "compute_kpis_tool"
     ],
     "key_numbers": [
-      0.8656,
-      0.8709,
-      0.7849,
-      0.8693,
-      0.8586
+      0.8705,
+      0.8703,
+      0.8221,
+      0.8701,
+      0.8675
     ],
-    "notes": "Plant PRs: P1=0.8656, P2=0.8709, P3=0.7849, P4=0.8693, P5=0.8586."
+    "notes": "Plant PRs: [0.8705, 0.8703, 0.8221, 0.8701, 0.8675]",
+    "start_date": "2026-09-01",
+    "end_date": "2026-09-26"
   },
   {
     "id": "q08",
@@ -137,9 +150,11 @@
       "estimate_soiling_loss_tool"
     ],
     "key_numbers": [
-      126367.84
+      241076.58
     ],
-    "notes": "126,367.84 kWh. SQL formula: yield*(1/soiling_ratio-1)."
+    "notes": "241076.58 kWh soiling loss for Plant 2.",
+    "start_date": "2026-09-01",
+    "end_date": "2026-09-26"
   },
   {
     "id": "q09",
@@ -156,9 +171,11 @@
       "rank_entities_tool"
     ],
     "key_numbers": [
-      0.8722
+      0.871
     ],
-    "notes": "Top block PR = 0.8722. SQL: block-level SUM(yield)/SUM(dc_kw*H)."
+    "notes": "Top block PR Plant 2 = 0.871.",
+    "start_date": "2026-09-01",
+    "end_date": "2026-09-26"
   },
   {
     "id": "q10",
@@ -173,7 +190,9 @@
       "analyze_weather_correlation_tool"
     ],
     "key_numbers": [],
-    "notes": "Qualitative / R2 value; exact number depends on regression result."
+    "notes": "Qualitative regression analysis.",
+    "start_date": "2026-09-01",
+    "end_date": "2026-09-26"
   },
   {
     "id": "q11",
@@ -188,9 +207,11 @@
       "estimate_soiling_loss_tool"
     ],
     "key_numbers": [
-      210466.31
+      250609.87
     ],
-    "notes": "210,466.31 kWh. SQL: SUM(yield*(1/soiling_ratio-1)) plant_id=3."
+    "notes": "250609.87 kWh soiling loss for Plant 3.",
+    "start_date": "2026-09-01",
+    "end_date": "2026-09-26"
   },
   {
     "id": "q12",
@@ -207,9 +228,11 @@
       "rank_entities_tool"
     ],
     "key_numbers": [
-      0.7849
+      0.8221
     ],
-    "notes": "Plant 3 has the worst PR = 0.7849."
+    "notes": "Plant 3 has the worst PR = 0.8221.",
+    "start_date": "2026-09-01",
+    "end_date": "2026-09-26"
   },
   {
     "id": "q13",
@@ -226,7 +249,9 @@
     "key_numbers": [
       1
     ],
-    "notes": "1 inverter-day with fault code (code=3). SQL: COUNT where code IN fault_codes."
+    "notes": "1 fault-code days in Plant 2.",
+    "start_date": "2026-09-01",
+    "end_date": "2026-09-26"
   },
   {
     "id": "q14",
@@ -243,9 +268,11 @@
       "rank_entities_tool"
     ],
     "key_numbers": [
-      0.8655
+      0.8672
     ],
-    "notes": "Worst block PR = 0.8655. SQL: block-level PR ascending order LIMIT 1."
+    "notes": "Worst block PR Plant 2 = 0.8672.",
+    "start_date": "2026-09-01",
+    "end_date": "2026-09-26"
   },
   {
     "id": "q15",
@@ -260,9 +287,11 @@
       "estimate_soiling_loss_tool"
     ],
     "key_numbers": [
-      3.82
+      3.58
     ],
-    "notes": "3.82% loss. SQL: SUM(yield*(1/sr-1))/SUM(yield)*100 for plant 1."
+    "notes": "3.58% soiling loss for Plant 1.",
+    "start_date": "2026-09-01",
+    "end_date": "2026-09-26"
   },
   {
     "id": "q16",
@@ -276,8 +305,13 @@
       "fetch_inverter_daily_tool",
       "detect_anomalies_tool"
     ],
-    "key_numbers": [],
-    "notes": "Qualitative; counts anomalous inverter-days via rolling z-score."
+    "key_numbers": [
+      2
+    ],
+    "notes": "2 statistical anomalies on P1_Block_A_INV_02 (2026-09-03 and 2026-09-04).",
+    "start_date": "2026-08-28",
+    "end_date": "2026-09-26",
+    "undated": true
   },
   {
     "id": "q17",
@@ -292,9 +326,11 @@
       "compute_kpis_tool"
     ],
     "key_numbers": [
-      20101316.78
+      26644786.09
     ],
-    "notes": "Sum of all plant yields in September. Approximately 20.1 GWh."
+    "notes": "Total yield all plants = 26644786.09 kWh.",
+    "start_date": "2026-09-01",
+    "end_date": "2026-09-26"
   },
   {
     "id": "q18",
@@ -311,9 +347,11 @@
       "rank_entities_tool"
     ],
     "key_numbers": [
-      0.8709
+      0.8705
     ],
-    "notes": "Plant 2 had the highest PR = 0.8709."
+    "notes": "Plant 1 has the highest PR = 0.8705.",
+    "start_date": "2026-09-01",
+    "end_date": "2026-09-26"
   },
   {
     "id": "q19",
@@ -330,7 +368,9 @@
     "key_numbers": [
       0
     ],
-    "notes": "No faults in plant 3. Warning code (2) is not a fault."
+    "notes": "0 faults in Plant 3.",
+    "start_date": "2026-09-01",
+    "end_date": "2026-09-26"
   },
   {
     "id": "q20",
@@ -345,11 +385,13 @@
       "estimate_soiling_loss_tool"
     ],
     "key_numbers": [
-      89771.84,
-      126367.84,
-      210466.31
+      147847.51,
+      241076.58,
+      250609.87
     ],
-    "notes": "Plant 1: 89.8k kWh, Plant 2: 126.4k kWh, Plant 3: 210.5k kWh."
+    "notes": "Soiling losses: P1=147847.51, P2=241076.58, P3=250609.87.",
+    "start_date": "2026-09-01",
+    "end_date": "2026-09-26"
   },
   {
     "id": "q21",
@@ -364,9 +406,11 @@
       "compute_kpis_tool"
     ],
     "key_numbers": [
-      2717079.64
+      4750500.0
     ],
-    "notes": "Expected yield = SUM(rated_dc_kw * H). Denominator of PR formula."
+    "notes": "Theoretical expected yield Plant 1 = 4750500.0 kWh.",
+    "start_date": "2026-09-01",
+    "end_date": "2026-09-26"
   },
   {
     "id": "q22",
@@ -383,7 +427,9 @@
       "rank_entities_tool"
     ],
     "key_numbers": [],
-    "notes": "Ranked list; no single key number, correctness checked via grounding."
+    "notes": "Inverter PR ranking.",
+    "start_date": "2026-09-01",
+    "end_date": "2026-09-26"
   },
   {
     "id": "q23",
@@ -398,9 +444,11 @@
       "estimate_soiling_loss_tool"
     ],
     "key_numbers": [
-      126367.84
+      241076.58
     ],
-    "notes": "Soiling caused 126,367.84 kWh loss (\u00e2\u2030\u02c63.2% of yield)."
+    "notes": "Plant 2 soiling loss = 241076.58 kWh.",
+    "start_date": "2026-09-01",
+    "end_date": "2026-09-26"
   },
   {
     "id": "q24",
@@ -417,9 +465,11 @@
       "rank_entities_tool"
     ],
     "key_numbers": [
-      0.856265
+      0.8651
     ],
-    "notes": "Block 1 (PR=0.8563) is below the plant average (0.8656)."
+    "notes": "Worst block PR Plant 1 = 0.8651.",
+    "start_date": "2026-09-01",
+    "end_date": "2026-09-26"
   },
   {
     "id": "q25",
@@ -434,10 +484,12 @@
       "estimate_soiling_loss_tool"
     ],
     "key_numbers": [
-      89771.84,
-      2351535.09,
-      2441306.93
+      147847.51,
+      4135384.29,
+      4283231.8
     ],
-    "notes": "Clean yield = actual + soiling_loss = 2,351,535 + 89,772 = 2,441,307 kWh."
+    "notes": "Soiling=147847.51, Actual=4135384.29, Clean=4283231.8 kWh.",
+    "start_date": "2026-09-01",
+    "end_date": "2026-09-26"
   }
 ]

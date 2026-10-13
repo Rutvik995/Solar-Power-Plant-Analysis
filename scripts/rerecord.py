@@ -24,10 +24,11 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("rerecord")
 
+import time
+
 from dotenv import load_dotenv
 load_dotenv()
 
-from langchain_google_genai import ChatGoogleGenerativeAI
 from solar_agent.graph.llm_recorder import ReplayLLM
 from solar_agent.graph.graph import build_graph, initial_state
 from solar_agent.graph.data_store import DataStore
@@ -58,14 +59,20 @@ def main():
             print(f"  [{q['id']}] {q['question']}")
         return
 
-    api_key = os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")
+    api_key = (
+        os.environ.get("GROQ_API_KEY")
+        or os.environ.get("GOOGLE_API_KEY")
+        or os.environ.get("GEMINI_API_KEY")
+    )
     if not api_key:
-        logger.error("Set GOOGLE_API_KEY or GEMINI_API_KEY in your .env file.")
+        logger.error("Set GROQ_API_KEY (or GOOGLE_API_KEY) in your .env file.")
         sys.exit(1)
 
     graph = build_graph(mode="record")
 
     logger.info("Starting re-record run: %d questions", len(eval_set))
+
+    sleep_between = float(os.environ.get("RERECORD_SLEEP", "4"))
 
     for idx, q in enumerate(eval_set, 1):
         DataStore.clear()
@@ -75,6 +82,8 @@ def main():
             logger.info("  → %s", (result.get("final_answer") or "")[:120].replace("\n", " "))
         except Exception as exc:
             logger.error("  FAILED: %s", exc)
+        if idx < len(eval_set):
+            time.sleep(sleep_between)
 
     dummy_recorder = ReplayLLM(fallback_llm=None, mode="replay")
     logger.info(
