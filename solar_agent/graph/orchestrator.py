@@ -398,7 +398,7 @@ class Orchestrator:
                 ),
             }
 
-        # Check for previous query scope context on the same thread
+        # Check for previous query, tasks, and scope context on the same thread
         prev_scope = state.get("previous_scope")
         if not prev_scope and state.get("plan") and replan_count == 0:
             try:
@@ -406,15 +406,28 @@ class Orchestrator:
             except Exception:
                 prev_scope = None
 
+        prev_query = state.get("previous_query")
+        prev_tasks = state.get("previous_tasks")
+
         # Build the human message
         human_parts = [f"User query: {query}"]
-        if prev_scope:
-            prev_p = prev_scope.get("plant_ids") or []
-            prev_s = prev_scope.get("start_date")
-            prev_e = prev_scope.get("end_date")
+        if prev_query or prev_tasks or prev_scope:
+            context_desc = []
+            if prev_query:
+                context_desc.append(f"previous_user_question='{prev_query}'")
+            if prev_tasks:
+                context_desc.append(f"previous_tasks={json.dumps(prev_tasks)}")
+            if prev_scope:
+                prev_p = prev_scope.get("plant_ids") or []
+                prev_s = prev_scope.get("start_date")
+                prev_e = prev_scope.get("end_date")
+                context_desc.append(f"previous_scope(plant_ids={prev_p}, date_range={prev_s} to {prev_e})")
+
             human_parts.append(
-                f"\nContext from previous query on this thread: plant_ids={prev_p}, date_range={prev_s} to {prev_e}. "
-                "If the user query is a follow-up (e.g. 'now show Block B', 'same for Plant 2'), inherit the plant_ids and date range unless overridden."
+                f"\nContext from previous query on this thread: {'; '.join(context_desc)}. "
+                "If the user query is a follow-up (e.g. 'the same for Plant 2', 'same for Plant 2', 'now Plant 2', 'what about Plant 2'), "
+                "repeat the previous analysis type (agent, tools, metrics) for the new plant/entity specified by the user, "
+                "inheriting the date range unless overridden."
             )
 
         if replan_count > 0 and prev_validation:
@@ -438,50 +451,196 @@ class Orchestrator:
         except BudgetExceeded:
             raise
         except CacheMissError:
+            import re
             logger.info("Orchestrator CacheMiss in replay; constructing deterministic plan for '%s'", query)
             q_lower = query.lower()
-            if any(w in q_lower for w in ["fault", "zero generation", "underperform", "anomal", "alarm"]):
+
+            is_followup = any(kw in q_lower for kw in [
+                "same for plant", "the same for plant", "repeat for plant", "what about plant", "now plant", "same for block"
+            ])
+
+            if is_followup and (prev_tasks or prev_query):
+                inherited_agent = None
+                inherited_tool = None
+                if prev_tasks:
+                    for pt in prev_tasks:
+                        if pt.get("agent") != "data":
+                            inherited_agent = pt.get("agent")
+                            inherited_tool = pt.get("tool")
+                            break
+                if not inherited_agent and prev_query:
+                    pq_lower = prev_query.lower()
+                    if any(w in pq_lower for w in ["soiling", "dust", "dirt", "wash"]):
+                        inherited_agent = "environment"
+                        inherited_tool = "estimate_soiling_loss_tool"
+                    elif any(w in pq_lower for w in ["fault", "zero generation", "underperform"]):
+                        inherited_agent = "fault"
+                        inherited_tool = "detect_status_faults_tool"
+                    else:
+                        inherited_agent = "performance"
+                        inherited_tool = "compute_kpis_tool"
+
+                plant_m = re.search(r"plant\s*(\d+)", q_lower)
+                pids = [int(plant_m.group(1))] if plant_m else ([2] if "plant 2" in q_lower else ([1] if not prev_scope else (prev_scope.get("plant_ids") or [1])))
+
+                agent = inherited_agent or "performance"
+                tool_hint = inherited_tool
+                intent = state.get("previous_intent") or ("environmental_impact" if agent == "environment" else "fault_diagnosis" if agent == "fault" else "summary")
+                desc = f"Execute follow-up {agent} analysis for plant {pids}."
+                scope_dict = _default_scope()
+                scope_dict["plant_ids"] = pids
+                if prev_scope:
+                    if prev_scope.get("start_date"):
+                        scope_dict["start_date"] = prev_scope["start_date"]
+                    if prev_scope.get("end_date"):
+                        scope_dict["end_date"] = prev_scope["end_date"]
+                payload = {
+                    "intent": intent,
+                    "scope": scope_dict,
+                    "tasks": [
+                        {
+                            "id": "t1",
+                            "agent": "data",
+                            "description": f"Fetch telemetry for plant {pids}",
+                            "inputs": {"plant_ids": pids},
+                            "depends_on": [],
+                        },
+                        {
+                            "id": "t2",
+                            "agent": agent,
+                            "description": desc,
+                            "inputs": {"data_ref": "$t1.data_ref"},
+                            "depends_on": ["t1"],
+                            "tool_hint": tool_hint,
+                        },
+                    ],
+                    "success_criteria": f"Complete follow-up {agent} analysis for Plant {pids}.",
+                }
+            elif any(w in q_lower for w in ["fault", "zero generation", "underperform", "anomal", "alarm"]):
                 intent = "fault_diagnosis"
                 agent = "fault"
                 desc = "Analyze telemetry for faults, zero generation, and anomalies."
+                payload = {
+                    "intent": intent,
+                    "scope": _default_scope(),
+                    "tasks": [
+                        {
+                            "id": "t1",
+                            "agent": "data",
+                            "description": f"Fetch telemetry for query: {query}",
+                            "inputs": {},
+                            "depends_on": []
+                        },
+                        {
+                            "id": "t2",
+                            "agent": agent,
+                            "description": desc,
+                            "inputs": {"data_ref": "$t1.data_ref"},
+                            "depends_on": ["t1"]
+                        }
+                    ],
+                    "success_criteria": "Answer the user question."
+                }
             elif any(w in q_lower for w in ["soiling", "dust", "dirt", "wash", "weather", "temperature"]):
                 intent = "environmental_impact"
                 agent = "environment"
                 desc = "Estimate soiling loss and analyze environmental impact."
+                payload = {
+                    "intent": intent,
+                    "scope": _default_scope(),
+                    "tasks": [
+                        {
+                            "id": "t1",
+                            "agent": "data",
+                            "description": f"Fetch telemetry for query: {query}",
+                            "inputs": {},
+                            "depends_on": []
+                        },
+                        {
+                            "id": "t2",
+                            "agent": agent,
+                            "description": desc,
+                            "inputs": {"data_ref": "$t1.data_ref"},
+                            "depends_on": ["t1"]
+                        }
+                    ],
+                    "success_criteria": "Answer the user question."
+                }
             elif any(w in q_lower for w in ["rank", "highest", "lowest", "best", "worst"]):
                 intent = "performance_ranking"
                 agent = "performance"
                 desc = "Compute KPIs and rank entities by performance."
+                payload = {
+                    "intent": intent,
+                    "scope": _default_scope(),
+                    "tasks": [
+                        {
+                            "id": "t1",
+                            "agent": "data",
+                            "description": f"Fetch telemetry for query: {query}",
+                            "inputs": {},
+                            "depends_on": []
+                        },
+                        {
+                            "id": "t2",
+                            "agent": agent,
+                            "description": desc,
+                            "inputs": {"data_ref": "$t1.data_ref"},
+                            "depends_on": ["t1"]
+                        }
+                    ],
+                    "success_criteria": "Answer the user question."
+                }
             elif "compare" in q_lower:
                 intent = "comparison"
                 agent = "performance"
                 desc = "Compare performance metrics."
+                payload = {
+                    "intent": intent,
+                    "scope": _default_scope(),
+                    "tasks": [
+                        {
+                            "id": "t1",
+                            "agent": "data",
+                            "description": f"Fetch telemetry for query: {query}",
+                            "inputs": {},
+                            "depends_on": []
+                        },
+                        {
+                            "id": "t2",
+                            "agent": agent,
+                            "description": desc,
+                            "inputs": {"data_ref": "$t1.data_ref"},
+                            "depends_on": ["t1"]
+                        }
+                    ],
+                    "success_criteria": "Answer the user question."
+                }
             else:
                 intent = "summary"
                 agent = "performance"
                 desc = "Compute solar performance KPIs."
-
-            payload = {
-                "intent": intent,
-                "scope": _default_scope(),
-                "tasks": [
-                    {
-                        "id": "t1",
-                        "agent": "data",
-                        "description": f"Fetch telemetry for query: {query}",
-                        "inputs": {},
-                        "depends_on": []
-                    },
-                    {
-                        "id": "t2",
-                        "agent": agent,
-                        "description": desc,
-                        "inputs": {"data_ref": "$t1.data_ref"},
-                        "depends_on": ["t1"]
-                    }
-                ],
-                "success_criteria": "Answer the user question."
-            }
+                payload = {
+                    "intent": intent,
+                    "scope": _default_scope(),
+                    "tasks": [
+                        {
+                            "id": "t1",
+                            "agent": "data",
+                            "description": f"Fetch telemetry for query: {query}",
+                            "inputs": {},
+                            "depends_on": []
+                        },
+                        {
+                            "id": "t2",
+                            "agent": agent,
+                            "description": desc,
+                            "inputs": {"data_ref": "$t1.data_ref"},
+                            "depends_on": ["t1"]
+                        }
+                    ],
+                    "success_criteria": "Answer the user question."
+                }
         except Exception as first_exc:
             logger.warning("Orchestrator plan JSON parsing failed (%s). Retrying with reminder...", first_exc)
             reminder_messages = list(messages) + [

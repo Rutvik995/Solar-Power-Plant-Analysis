@@ -289,10 +289,36 @@ export default function ChatPage() {
                             </div>
                           )}
 
-                          {/* Markdown Narrative */}
-                          <div className="prose prose-invert prose-sm max-w-none text-text leading-relaxed text-sm">
-                            <ReactMarkdown>{msg.data?.answer_markdown || 'No answer generated.'}</ReactMarkdown>
-                          </div>
+                          {/* Structured Short Answer & Supporting Markdown */}
+                          {msg.data?.short_answer ? (
+                            <div className="space-y-3">
+                              <div className="p-3.5 rounded-lg bg-card/60 border border-primary/20 text-text leading-relaxed text-sm font-medium">
+                                <div className="text-[11px] font-bold text-primary uppercase tracking-wider mb-1 flex items-center gap-1.5">
+                                  <Sparkles className="w-3.5 h-3.5 text-primary" /> Key Finding
+                                </div>
+                                {msg.data.short_answer}
+                              </div>
+                              {msg.data.details_markdown && (
+                                <div className="prose prose-invert prose-sm max-w-none text-text leading-relaxed text-sm">
+                                  <ReactMarkdown>{msg.data.details_markdown}</ReactMarkdown>
+                                </div>
+                              )}
+                              {msg.data.assumptions && msg.data.assumptions.length > 0 && (
+                                <div className="text-[11px] text-muted space-y-0.5 pt-1">
+                                  <span className="font-semibold text-muted/90">Assumptions:</span>
+                                  <ul className="list-disc pl-4 space-y-0.5 text-muted/80">
+                                    {msg.data.assumptions.map((a, aIdx) => (
+                                      <li key={aIdx}>{a}</li>
+                                    ))}
+                                  </ul>
+                                </div>
+                              )}
+                            </div>
+                          ) : (
+                            <div className="prose prose-invert prose-sm max-w-none text-text leading-relaxed text-sm">
+                              <ReactMarkdown>{msg.data?.answer_markdown || 'No answer generated.'}</ReactMarkdown>
+                            </div>
+                          )}
 
                           {/* Embedded Data Tables directly under answer */}
                           {msg.data?.tables && msg.data.tables.length > 0 && (
@@ -570,9 +596,15 @@ export default function ChatPage() {
                             <Badge variant={statusVariant}>{step.status}</Badge>
                           </div>
 
+                          {step.task && (
+                            <p className="text-[11px] text-muted/90">
+                              {step.task}
+                            </p>
+                          )}
+
                           <div className="text-[11px] text-muted flex items-center justify-between pt-0.5">
                             <span>
-                              Tool: <code className="text-teal font-mono">{step.tool || 'auto'}</code>
+                              Tool: <code className="text-teal font-mono">{step.tool || step.agent}</code>
                             </span>
                             {step.depends_on && step.depends_on.length > 0 && (
                               <span className="text-[10px]">

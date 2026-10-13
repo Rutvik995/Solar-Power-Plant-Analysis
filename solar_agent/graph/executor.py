@@ -274,6 +274,9 @@ class Executor:
             for fut, task in futures.items():
                 try:
                     result = fut.result(timeout=timeout)
+                    if result and getattr(result, "summary", None):
+                        from solar_agent.graph.synthesizer import clean_task_summary
+                        result.summary = clean_task_summary(result.summary)
                     new_results[task.id] = result
                     logger.info(
                         "Task '%s' completed with status=%s.", task.id, result.status

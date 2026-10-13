@@ -439,7 +439,7 @@ def get_dashboard_flagged(
     start: Optional[str] = Query(None),
     end: Optional[str] = Query(None),
 ):
-    """Returns flagged inverters: inverter, block, date, type, status code, PR."""
+    """Returns flagged inverters: one row per inverter and date with flagged_by list."""
     plant_ids, start_date, end_date = parse_dashboard_params(plant_id, start, end)
     df = q.fetch_inverter_daily(start_date, end_date, plant_ids=plant_ids)
     if df.empty:
@@ -451,7 +451,7 @@ def get_dashboard_flagged(
     except Exception:
         df["peer_deviation_score"] = np.nan
 
-    flagged = []
+    grouped: dict[tuple[str, str], dict[str, Any]] = {}
     for _, r in df.iterrows():
         ftype = None
         sc = r.get("status_code")
@@ -469,20 +469,30 @@ def get_dashboard_flagged(
             ftype = "Underperformance"
 
         if ftype:
+            inv_id = str(r["inverter_id"])
+            d_str = r["log_date"].isoformat()
+            key = (inv_id, d_str)
             pr_val = float(round(r["performance_ratio"], 4)) if pd.notna(r.get("performance_ratio")) else None
-            flagged.append({
-                "inverter": str(r["inverter_id"]),
-                "inverter_id": str(r["inverter_id"]),
-                "block": str(r.get("block_name") or r["block_id"]),
-                "block_id": str(r["block_id"]),
-                "date": r["log_date"].isoformat(),
-                "type": ftype,
-                "status_code": int(sc) if pd.notna(sc) else None,
-                "pr": pr_val,
-                "performance_ratio": pr_val,
-            })
+            blk_str = str(r.get("block_name") or r["block_id"])
+            if key not in grouped:
+                grouped[key] = {
+                    "inverter": inv_id,
+                    "inverter_id": inv_id,
+                    "block": blk_str,
+                    "block_id": str(r["block_id"]),
+                    "date": d_str,
+                    "flagged_by": [ftype],
+                    "type": ftype,
+                    "status_code": int(sc) if pd.notna(sc) else None,
+                    "pr": pr_val,
+                    "performance_ratio": pr_val,
+                }
+            else:
+                if ftype not in grouped[key]["flagged_by"]:
+                    grouped[key]["flagged_by"].append(ftype)
+                    grouped[key]["type"] = ", ".join(grouped[key]["flagged_by"])
 
-    return flagged
+    return list(grouped.values())
 
 
 # ---------------------------------------------------------------------------
@@ -498,11 +508,12 @@ class ChatRequest(BaseModel):
 @app.post("/api/chat")
 def chat_endpoint(request: ChatRequest, req: Request):
     """
-    Runs the multi-agent graph and returns:
-    {answer_markdown, tables, charts, plan, warnings, period, sources, llm_calls, elapsed_ms, error}
-    Maps HTTP 429 and BudgetExceeded to a clear error object.
+    Runs the multi-agent graph and returns structured fields:
+    short_answer, details_markdown, tables, assumptions, warnings, period, sources, plan, llm_calls, elapsed_ms, error.
     """
-    start_time = time.time()
+    from solar_agent.graph.synthesizer import clean_task_summary, normalize_spaces, extract_structured_answers
+
+    start_time = time.perf_counter()
     thread_id = request.thread_id or str(uuid.uuid4())
     mode = request.mode or "replay"
 
@@ -514,16 +525,20 @@ def chat_endpoint(request: ChatRequest, req: Request):
         graph = build_graph(llm=llm_override, mode=mode, checkpointer=checkpointer)
         config = {"configurable": {"thread_id": thread_id}}
         state_input = initial_state(request.query.strip())
+        state_input["run_id"] = str(uuid.uuid4())
         result = graph.invoke(state_input, config=config)
     except BudgetExceeded as exc:
-        elapsed_ms = round((time.time() - start_time) * 1000, 2)
+        elapsed_ms = round((time.perf_counter() - start_time) * 1000, 1)
         return CleanJSONResponse(
             status_code=429,
             content={
+                "short_answer": f"LLM call budget exceeded: {exc}",
+                "details_markdown": "",
                 "answer_markdown": f"LLM call budget exceeded: {exc}",
                 "tables": [],
                 "charts": [],
                 "plan": [],
+                "assumptions": [],
                 "warnings": [str(exc)],
                 "period": None,
                 "sources": [],
@@ -543,15 +558,18 @@ def chat_endpoint(request: ChatRequest, req: Request):
             },
         )
     except Exception as exc:
-        elapsed_ms = round((time.time() - start_time) * 1000, 2)
+        elapsed_ms = round((time.perf_counter() - start_time) * 1000, 1)
         if is_rate_limit_error(exc):
             return CleanJSONResponse(
                 status_code=429,
                 content={
+                    "short_answer": "Rate limit exceeded (HTTP 429). Please wait a moment and retry.",
+                    "details_markdown": "",
                     "answer_markdown": "Rate limit exceeded (HTTP 429). Please wait a moment and retry.",
                     "tables": [],
                     "charts": [],
                     "plan": [],
+                    "assumptions": [],
                     "warnings": [str(exc)],
                     "period": None,
                     "sources": [],
@@ -573,10 +591,13 @@ def chat_endpoint(request: ChatRequest, req: Request):
         return CleanJSONResponse(
             status_code=400,
             content={
+                "short_answer": f"Execution error: {exc}",
+                "details_markdown": "",
                 "answer_markdown": f"Execution error: {exc}",
                 "tables": [],
                 "charts": [],
                 "plan": [],
+                "assumptions": [],
                 "warnings": [str(exc)],
                 "period": None,
                 "sources": [],
@@ -596,8 +617,19 @@ def chat_endpoint(request: ChatRequest, req: Request):
             },
         )
 
-    elapsed_ms = round((time.time() - start_time) * 1000, 2)
+    elapsed_ms = round((time.perf_counter() - start_time) * 1000, 1)
     results_dict = result.get("results") or {}
+
+    ans = normalize_spaces(result.get("final_answer") or "")
+    short_answer = result.get("short_answer")
+    details_markdown = result.get("details_markdown")
+    if not short_answer or not details_markdown:
+        short_answer, details_markdown = extract_structured_answers(ans)
+    short_answer = normalize_spaces(short_answer)
+    details_markdown = normalize_spaces(details_markdown)
+
+    assumptions = list(result.get("assumptions") or [])
+    warnings = list(result.get("warnings") or [])
 
     # 1. Tables: [{title, columns, rows}]
     tables = []
@@ -613,13 +645,63 @@ def chat_endpoint(request: ChatRequest, req: Request):
                         df_head[c] = df_head[c].apply(
                             lambda x: x.isoformat() if hasattr(x, "isoformat") else str(x) if pd.notna(x) else None
                         )
+
                 cols = [str(c) for c in df_head.columns]
-                rows = df_head.values.tolist()
-                tables.append({
-                    "title": f"Task {tid}: {tr.summary or 'Data Table'}",
-                    "columns": cols,
-                    "rows": rows,
-                })
+                is_flagged_table = "inverter_id" in cols and ("log_date" in cols or "date" in cols) and ("status_code" in cols or "status_meaning" in cols or "flagged" in str(tr.summary).lower())
+
+                if is_flagged_table:
+                    date_col = "log_date" if "log_date" in cols else "date"
+                    grouped_f: dict[tuple[str, str], dict[str, Any]] = {}
+                    status_meanings_found = {}
+
+                    for _, r in df_head.iterrows():
+                        inv_id = str(r["inverter_id"])
+                        d_str = str(r[date_col])
+                        key = (inv_id, d_str)
+                        sc_val = r.get("status_code")
+                        sc_meaning = r.get("status_meaning")
+                        if pd.notna(sc_val) and sc_meaning:
+                            try:
+                                status_meanings_found[int(sc_val)] = str(sc_meaning)
+                            except Exception:
+                                pass
+
+                        flag_reason = r.get("flagging_tool") or r.get("type") or "Fault"
+                        if key not in grouped_f:
+                            grouped_f[key] = {
+                                "inverter_id": inv_id,
+                                "date": d_str,
+                                "block": str(r.get("block_name", r.get("block_id", ""))),
+                                "flagged_by": [flag_reason],
+                                "pr": float(round(r["performance_ratio"], 4)) if "performance_ratio" in r and pd.notna(r["performance_ratio"]) else (float(round(r["pr"], 4)) if "pr" in r and pd.notna(r["pr"]) else None),
+                            }
+                        else:
+                            if flag_reason not in grouped_f[key]["flagged_by"]:
+                                grouped_f[key]["flagged_by"].append(flag_reason)
+
+                    for sc, meaning in sorted(status_meanings_found.items()):
+                        line = f"Status Code {sc}: {meaning}"
+                        if line not in assumptions:
+                            assumptions.append(line)
+
+                    flagged_cols = ["inverter_id", "date", "block", "flagged_by", "pr"]
+                    flagged_rows = [
+                        [g["inverter_id"], g["date"], g["block"], g["flagged_by"], g["pr"]]
+                        for g in grouped_f.values()
+                    ]
+                    tables.append({
+                        "title": f"Task {tid}: Flagged Inverters",
+                        "columns": flagged_cols,
+                        "rows": flagged_rows,
+                    })
+                else:
+                    rows = df_head.values.tolist()
+                    clean_title = clean_task_summary(tr.summary) if tr.summary else "Data Table"
+                    tables.append({
+                        "title": f"Task {tid}: {clean_title}",
+                        "columns": cols,
+                        "rows": rows,
+                    })
 
     # 2. Charts: [plotly_json]
     charts = []
@@ -635,16 +717,36 @@ def chat_endpoint(request: ChatRequest, req: Request):
                 charts.append(cj)
 
     # 3. Plan: [{id, agent, tool, depends_on, status}]
+    # Plan steps carry real agent and tool names (no "auto") and a status.
+    agent_default_tools = {
+        "data": "fetch_inverter_daily",
+        "performance": "compute_kpis_tool",
+        "fault": "detect_status_faults_tool",
+        "environment": "estimate_soiling_loss_tool",
+    }
     plan_data = []
     plan_obj = result.get("plan")
     if plan_obj and hasattr(plan_obj, "tasks"):
         for t in plan_obj.tasks:
             tr = results_dict.get(t.id)
             st_val = tr.status.value if tr and hasattr(tr, "status") and hasattr(tr.status, "value") else "pending"
+
+            real_tool = None
+            if tr and getattr(tr, "tool_calls_made", None) and tr.tool_calls_made:
+                real_tool = tr.tool_calls_made[0]
+            if not real_tool:
+                hint = getattr(t, "tool_hint", None) or getattr(t, "tool", None)
+                if hint and hint != "auto":
+                    real_tool = hint
+            if not real_tool or real_tool == "auto":
+                real_tool = agent_default_tools.get(t.agent, "fetch_inverter_daily")
+
+            summary_clean = clean_task_summary(tr.summary) if (tr and tr.summary) else f"{t.agent.capitalize()} analysis completed."
             plan_data.append({
                 "id": t.id,
+                "task": summary_clean,
                 "agent": t.agent,
-                "tool": t.tool_hint or getattr(t, "tool", None),
+                "tool": real_tool,
                 "depends_on": t.depends_on,
                 "status": st_val,
             })
@@ -658,7 +760,7 @@ def chat_endpoint(request: ChatRequest, req: Request):
             "end": s.end_date.isoformat(),
         }
 
-    # 5. Sources
+    # 5. Sources: tool names
     sources = []
     for tr in results_dict.values():
         if tr and getattr(tr, "tool_calls_made", None):
@@ -666,28 +768,27 @@ def chat_endpoint(request: ChatRequest, req: Request):
                 if tc not in sources:
                     sources.append(tc)
     if not sources:
-        sources = ["daily_inverter_telemetry", "daily_weather_telemetry"]
+        sources = ["fetch_inverter_daily", "compute_kpis_tool"]
 
-    # 6. LLM calls: {planner, agent, synthesizer, total, budget}
-    total_calls = result.get("llm_call_count", 0)
-    budget = settings.max_llm_calls_per_query
-    replan_count = result.get("replan_count", 0)
-    planner_calls = (1 + replan_count) if total_calls > 0 else 0
-    synth_calls = 1 if (result.get("final_answer") and total_calls >= (planner_calls + 1)) else 0
-    agent_calls = max(0, total_calls - planner_calls - synth_calls)
-    llm_calls = {
-        "planner": planner_calls,
-        "agent": agent_calls,
-        "synthesizer": synth_calls,
-        "total": total_calls,
-        "budget": budget,
-    }
-
-    warnings = list(result.get("warnings") or [])
+    # 6. LLM calls: computed per request
+    llm_calls = result.get("llm_calls")
+    if not llm_calls:
+        total_calls = result.get("llm_call_count", 0)
+        budget = settings.max_llm_calls_per_query
+        replan_count = result.get("replan_count", 0)
+        planner_calls = (1 + replan_count) if total_calls > 0 else 0
+        synth_calls = 1 if (result.get("final_answer") and total_calls >= (planner_calls + 1)) else 0
+        agent_calls = max(0, total_calls - planner_calls - synth_calls)
+        llm_calls = {
+            "planner": planner_calls,
+            "agent": agent_calls,
+            "synthesizer": synth_calls,
+            "total": total_calls,
+            "budget": budget,
+        }
 
     # Check for budget warning in final answer
     err_obj = None
-    ans = result.get("final_answer") or ""
     if "⚠ LLM call budget exceeded" in ans:
         err_obj = {
             "code": 429,
@@ -696,10 +797,13 @@ def chat_endpoint(request: ChatRequest, req: Request):
         }
 
     return {
+        "short_answer": short_answer,
+        "details_markdown": details_markdown,
         "answer_markdown": ans,
         "tables": tables,
         "charts": charts,
         "plan": plan_data,
+        "assumptions": assumptions,
         "warnings": warnings,
         "period": period,
         "sources": sources,

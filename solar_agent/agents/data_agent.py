@@ -133,10 +133,11 @@ class DataAgent:
                 f"({start_date} → {end_date}). data_ref={data_ref}"
             )
 
+            from solar_agent.graph.synthesizer import clean_task_summary
             return TaskResult(
                 task_id=task_id,
                 status=TaskStatus.DONE,
-                summary=summary,
+                summary=clean_task_summary(f"Fetched {row_count} inverter-days from {start_date} to {end_date}."),
                 data_ref=data_ref,
                 metrics={"row_count": row_count},
                 warnings=warnings,

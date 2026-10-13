@@ -308,10 +308,11 @@ class BaseSpecialistAgent:
         if self.name == "fault":
             metrics["anomaly_sentence"] = anomaly_sentence or "Anomalies found: none."
 
+        from solar_agent.graph.synthesizer import clean_task_summary
         return TaskResult(
             task_id=task_id,
             status=TaskStatus.DONE,
-            summary=summary,
+            summary=clean_task_summary(summary),
             data_ref=data_ref,
             metrics=metrics if metrics else None,
             warnings=warnings,
@@ -561,10 +562,11 @@ class SingleCallAgent:
             warnings = tool_output.get("warnings") or []
             summary_text = tool_output.get("summary", f"Tool '{tool_name}' completed.")
 
+            from solar_agent.graph.synthesizer import clean_task_summary
             return TaskResult(
                 task_id=task_id,
                 status=TaskStatus.DONE,
-                summary=summary_text,
+                summary=clean_task_summary(summary_text),
                 data_ref=data_ref,
                 metrics=metrics if metrics else None,
                 warnings=warnings,

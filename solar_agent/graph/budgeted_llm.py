@@ -96,6 +96,7 @@ class BudgetedLLM:
         budget: int | None = None,
         max_rpm: int | None = None,
         _counters: dict[str, int] | None = None,
+        _role_counters: dict[str, int] | None = None,
         _timestamps: list[float] | None = None,
         _lock: threading.Lock | None = None,
     ) -> None:
@@ -104,6 +105,7 @@ class BudgetedLLM:
         self._max_rpm = max_rpm if max_rpm is not None else getattr(settings, "llm_max_rpm", 20)
         # Shared mutable dict: run_id -> call_count
         self._counters: dict[str, int] = _counters if _counters is not None else {}
+        self._role_counters: dict[str, int] | None = _role_counters
         # Shared sliding-window call timestamps for RPM throttling
         self._timestamps: list[float] = _timestamps if _timestamps is not None else []
         self._lock: threading.Lock = _lock if _lock is not None else threading.Lock()
@@ -114,6 +116,11 @@ class BudgetedLLM:
         """Return the call count for the given run_id."""
         with self._lock:
             return self._counters.get(run_id, 0)
+
+    def role_call_count(self, run_id: str = _DEFAULT_RUN_ID) -> int:
+        """Return the role-specific call count for the given run_id."""
+        with self._lock:
+            return self._role_counters.get(run_id, 0) if self._role_counters is not None else 0
 
     # ── LLM interface ───────────────────────────────────────────────────────
 
@@ -131,6 +138,8 @@ class BudgetedLLM:
                     "Returning partial answer from completed tasks."
                 )
             self._counters[run_id] = current + 1
+            if self._role_counters is not None:
+                self._role_counters[run_id] = self._role_counters.get(run_id, 0) + 1
             count = self._counters[run_id]
 
         logger.debug(
@@ -186,6 +195,7 @@ class BudgetedLLM:
             budget=self._budget,
             max_rpm=self._max_rpm,
             _counters=self._counters,    # share counter dict
+            _role_counters=self._role_counters,
             _timestamps=self._timestamps,# share timestamp window
             _lock=self._lock,            # share lock
         )
@@ -197,6 +207,7 @@ class BudgetedLLM:
             budget=self._budget,
             max_rpm=self._max_rpm,
             _counters=self._counters,
+            _role_counters=self._role_counters,
             _timestamps=self._timestamps,
             _lock=self._lock,
         )

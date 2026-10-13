@@ -340,3 +340,16 @@ class AgentState(TypedDict):
 
     # Preserved previous scope on this thread for follow-up query inheritance
     previous_scope: Optional[dict]
+
+    # Structured answer breakdown fields
+    short_answer: Optional[str]
+    details_markdown: Optional[str]
+
+    # Preserved previous user query on this thread for follow-up query inheritance
+    previous_query: Optional[str]
+
+    # Preserved previous task types and tools on this thread for follow-up query inheritance
+    previous_tasks: Optional[list[dict]]
+
+    # Preserved previous intent
+    previous_intent: Optional[str]

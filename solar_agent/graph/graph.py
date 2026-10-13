@@ -152,6 +152,11 @@ def build_graph(llm: Any = None, checkpointer=None, mode: str = "live", cache_na
 
     # We share ONE budget counter across all agents
     counters: dict[str, int] = {}
+    role_counters: dict[str, dict[str, int]] = {
+        "planner": {},
+        "agent": {},
+        "synthesizer": {},
+    }
     lock = threading.Lock()
 
     # ONE shared ReplayLLM cache — all roles read/write the same dict so saves
@@ -176,6 +181,7 @@ def build_graph(llm: Any = None, checkpointer=None, mode: str = "live", cache_na
             inner_llm=recorded,
             budget=settings.max_llm_calls_per_query,
             _counters=counters,
+            _role_counters=role_counters.setdefault(role, {}),
             _lock=lock,
         )
 
@@ -195,12 +201,27 @@ def build_graph(llm: Any = None, checkpointer=None, mode: str = "live", cache_na
     def _get_call_count(state: AgentState) -> int:
         return planner_llm.call_count(_run_id(state))
 
+    def _get_llm_calls(state: AgentState) -> dict:
+        rid = _run_id(state)
+        p = planner_llm.role_call_count(rid)
+        a = agent_llm.role_call_count(rid)
+        s = synth_llm.role_call_count(rid)
+        tot = planner_llm.call_count(rid)
+        return {
+            "planner": p,
+            "agent": a,
+            "synthesizer": s,
+            "total": tot,
+            "budget": settings.max_llm_calls_per_query,
+        }
+
     def orchestrator_node(state: AgentState) -> dict:
         try:
             patch = orchestrator.plan(state, run_id=_run_id(state))
             if state.get("plan") is not None:
                 patch["replan_count"] = state.get("replan_count", 0) + 1
             patch["llm_call_count"] = _get_call_count(state)
+            patch["llm_calls"] = _get_llm_calls(state)
             return patch
         except BudgetExceeded as exc:
             logger.error("Budget exceeded in orchestrator: %s", exc)
@@ -210,6 +231,7 @@ def build_graph(llm: Any = None, checkpointer=None, mode: str = "live", cache_na
         try:
             patch = executor.run_next_layer(state, run_id=_run_id(state))
             patch["llm_call_count"] = _get_call_count(state)
+            patch["llm_calls"] = _get_llm_calls(state)
             return patch
         except BudgetExceeded as exc:
             logger.error("Budget exceeded in executor: %s", exc)
@@ -218,12 +240,14 @@ def build_graph(llm: Any = None, checkpointer=None, mode: str = "live", cache_na
     def validator_node(state: AgentState) -> dict:
         patch = validator.validate(state)
         patch["llm_call_count"] = _get_call_count(state)
+        patch["llm_calls"] = _get_llm_calls(state)
         return patch
 
     def synthesizer_node(state: AgentState) -> dict:
         try:
             patch = synthesizer.synthesize(state, run_id=_run_id(state))
             patch["llm_call_count"] = _get_call_count(state)
+            patch["llm_calls"] = _get_llm_calls(state)
             return patch
         except BudgetExceeded as exc:
             logger.error("Budget exceeded in synthesizer: %s", exc)
@@ -231,9 +255,7 @@ def build_graph(llm: Any = None, checkpointer=None, mode: str = "live", cache_na
 
     def start_node(state: AgentState) -> dict:
         """Assign a fresh run_id at the start of each invocation."""
-        if not state.get("run_id"):
-            return {"run_id": str(_uuid.uuid4())}
-        return {}
+        return {"run_id": str(_uuid.uuid4())}
 
     g = StateGraph(AgentState)
 

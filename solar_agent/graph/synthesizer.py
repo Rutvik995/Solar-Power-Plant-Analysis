@@ -59,6 +59,152 @@ RULES:
 """
 
 
+import re
+
+def normalize_spaces(text: str) -> str:
+    """Normalize U+202F, U+2009, U+200A and U+00A0 to a plain space."""
+    if not text:
+        return "" if text is not None and not isinstance(text, str) else text
+    if not isinstance(text, str):
+        return text
+    for ch in ("\u202f", "\u2009", "\u200a", "\u00a0"):
+        text = text.replace(ch, " ")
+    return text
+
+
+def clean_task_summary(text: Any) -> str:
+    """
+    Ensure task summaries never expose raw agent output.
+    Must be one clean sentence, stripping code fences, **TaskResult** and JSON.
+    """
+    if text is None:
+        return ""
+    if not isinstance(text, str):
+        text = str(text)
+
+    # 1. Normalize spaces first
+    text = normalize_spaces(text)
+
+    # 2. Extract from code fences
+    fence_pattern = re.compile(r"```(?:json|python)?\s*([\s\S]*?)\s*```", re.IGNORECASE)
+    match = fence_pattern.search(text)
+    if match:
+        fence_content = match.group(1).strip()
+        try:
+            parsed = json.loads(fence_content)
+            if isinstance(parsed, dict) and "summary" in parsed and parsed["summary"]:
+                text = str(parsed["summary"])
+            else:
+                text = fence_pattern.sub("", text).strip()
+                if not text:
+                    text = "Task executed successfully."
+        except Exception:
+            text = fence_content
+
+    # 3. Direct JSON
+    trimmed = text.strip()
+    if (trimmed.startswith("{") and trimmed.endswith("}")) or (trimmed.startswith("[") and trimmed.endswith("]")):
+        try:
+            parsed = json.loads(trimmed)
+            if isinstance(parsed, dict) and "summary" in parsed and parsed["summary"]:
+                text = str(parsed["summary"])
+            elif isinstance(parsed, dict) and "tool" in parsed:
+                text = f"Tool '{parsed['tool']}' executed successfully."
+            else:
+                text = "Task executed successfully."
+        except Exception:
+            m = re.search(r'"summary"\s*:\s*"([^"]+)"', trimmed)
+            if m:
+                text = m.group(1)
+            else:
+                text = re.sub(r"\{[\s\S]*?\}", "", trimmed).strip()
+                if not text:
+                    text = "Task executed successfully."
+
+    # 4. Strip **TaskResult** and TaskResult(...)
+    text = re.sub(r"\*{0,2}TaskResult\*{0,2}(?:\([^)]*\))?:?", "", text, flags=re.IGNORECASE)
+    # Strip any remaining inline JSON objects
+    text = re.sub(r"\{[\s\S]*?\}", "", text)
+    # Strip markdown headers, bullets, bolding
+    text = re.sub(r"^[#*\-\s>]+", "", text, flags=re.MULTILINE)
+    text = text.replace("**", "").replace("__", "")
+
+    # Clean multi-space / newlines
+    text = re.sub(r"\s+", " ", text).strip()
+    if not text:
+        return "Task completed successfully."
+
+    # 5. Extract strictly ONE clean sentence
+    sentence_match = re.search(r"^(.*?[.!?])(?:\s|$)", text)
+    if sentence_match:
+        sentence = sentence_match.group(1).strip()
+    else:
+        sentence = text.strip()
+        if not sentence.endswith((".", "!", "?")):
+            sentence += "."
+
+    sentence = normalize_spaces(sentence)
+    if not sentence or sentence in (".", "!", "?"):
+        return "Task completed successfully."
+    return sentence
+
+
+def extract_structured_answers(final_ans: str) -> tuple[str, str]:
+    """
+    Extracts (short_answer, details_markdown) from the synthesizer output.
+    details_markdown has no tables and no Assumptions/Warnings headings.
+    """
+    cleaned = normalize_spaces(final_ans)
+
+    # 1. Extract short answer
+    short_answer = ""
+    if "## Short Answer" in cleaned:
+        after_short = cleaned.split("## Short Answer", 1)[1]
+        parts = re.split(r"\n##\s+", after_short, maxsplit=1)
+        short_answer = parts[0].strip()
+    else:
+        sentences = re.split(r"(?<=[.!?])\s+", cleaned.strip())
+        short_answer = " ".join(sentences[:2]).strip()
+
+    # 2. Extract details markdown
+    details_part = ""
+    if "## Supporting Detail" in cleaned:
+        details_part = cleaned.split("## Supporting Detail", 1)[1]
+    elif "## Short Answer" in cleaned:
+        after_short = cleaned.split("## Short Answer", 1)[1]
+        parts = re.split(r"\n##\s+", after_short, maxsplit=1)
+        details_part = parts[1] if len(parts) > 1 else ""
+    else:
+        details_part = cleaned
+
+    cutoff_patterns = [
+        r"\n##\s+Assumptions\s*&\s*Warnings",
+        r"\n##\s+Assumptions",
+        r"\n##\s+Warnings",
+        r"\n##\s+Sources",
+        r"\nSources:",
+        r"\nPeriod analysed:",
+    ]
+    for cp in cutoff_patterns:
+        m = re.search(cp, details_part, re.IGNORECASE)
+        if m:
+            details_part = details_part[:m.start()]
+
+    # Strip tables from details_markdown
+    lines = details_part.splitlines()
+    non_table_lines = []
+    for line in lines:
+        stripped_line = line.strip()
+        if stripped_line.startswith("|") and stripped_line.endswith("|"):
+            continue
+        if re.match(r"^\|?[\s\-:|]+\|?$", stripped_line) and "-" in stripped_line:
+            continue
+        non_table_lines.append(line)
+
+    details_markdown = "\n".join(non_table_lines).strip()
+    return normalize_spaces(short_answer), normalize_spaces(details_markdown)
+
+
 def _build_compact_table(data_ref: str, key_cols: list[str], value_col: str, top_n: int = 10) -> str:
     """
     Build a compact Markdown table from a DataStore DataFrame for LLM context.
@@ -92,7 +238,7 @@ class Synthesizer:
         results = state.get("results") or {}
         plan = state.get("plan")
         validation = state.get("validation")
-        assumptions = state.get("assumptions") or []
+        assumptions = list(state.get("assumptions") or [])
 
         # Build structured task summaries for the LLM
         task_summaries = []
@@ -103,11 +249,15 @@ class Synthesizer:
             if tr is None:
                 continue
 
+            # Ensure task summary is clean, one sentence, and spaces normalized
+            clean_sum = clean_task_summary(tr.summary or "(no summary)")
+            tr.summary = clean_sum
+
             entry = {
                 "task_id": task.id,
                 "agent": task.agent,
                 "status": str(tr.status),
-                "summary": tr.summary or "(no summary)",
+                "summary": clean_sum,
                 "metrics": tr.metrics or {},
             }
             task_summaries.append(entry)
@@ -125,24 +275,69 @@ class Synthesizer:
                         f"### Ranking table from task {task.id} (performance agent):\n{table_md}"
                     )
 
-            # For fault tasks, build compact table of flagged items (max 10 rows)
+            # For fault tasks: one row per inverter and date with flagged_by list; status-code meaning in assumption
             if task.agent == "fault":
                 flagged = (tr.metrics or {}).get("flagged_items") or []
                 if flagged:
                     import pandas as pd
-                    f_df = pd.DataFrame(flagged[:10])
+                    status_meanings_found: dict[int, str] = {}
+                    grouped_flagged: dict[tuple[str, str], dict[str, Any]] = {}
+
+                    for item in flagged:
+                        key = (str(item.get("inverter_id", "")), str(item.get("date", "")))
+                        sc_val = item.get("status_code")
+                        sc_meaning = item.get("status_meaning")
+                        if sc_val is not None and sc_meaning:
+                            try:
+                                status_meanings_found[int(sc_val)] = str(sc_meaning)
+                            except Exception:
+                                pass
+
+                        tool_flag = item.get("flagging_tool") or "fault_detector"
+                        if key not in grouped_flagged:
+                            grouped_flagged[key] = {
+                                "inverter_id": key[0],
+                                "block": str(item.get("block", "")),
+                                "date": key[1],
+                                "flagged_by": [tool_flag],
+                                "pr": item.get("pr"),
+                                "peer_pr": item.get("peer_pr"),
+                                "peer_irradiance": item.get("peer_irradiance"),
+                            }
+                        else:
+                            if tool_flag not in grouped_flagged[key]["flagged_by"]:
+                                grouped_flagged[key]["flagged_by"].append(tool_flag)
+
+                    # Put status-code meanings in assumption lines, not columns
+                    for sc, meaning in sorted(status_meanings_found.items()):
+                        line = f"Status Code {sc}: {meaning}"
+                        if line not in assumptions:
+                            assumptions.append(line)
+
+                    # Format compact table: 1 row per inverter and date, flagged_by list
+                    table_rows = []
+                    for g in list(grouped_flagged.values())[:10]:
+                        table_rows.append({
+                            "inverter_id": g["inverter_id"],
+                            "block": g["block"],
+                            "date": g["date"],
+                            "flagged_by": ", ".join(g["flagged_by"]),
+                            "pr": g["pr"],
+                            "peer_pr": g["peer_pr"],
+                            "peer_irradiance": g["peer_irradiance"],
+                        })
+
+                    f_df = pd.DataFrame(table_rows)
                     cols = [
                         c
                         for c in [
                             "inverter_id",
                             "block",
                             "date",
-                            "status_code",
-                            "status_meaning",
+                            "flagged_by",
                             "pr",
                             "peer_pr",
                             "peer_irradiance",
-                            "flagging_tool",
                         ]
                         if c in f_df.columns
                     ]
@@ -378,4 +573,31 @@ class Synthesizer:
             + warnings_section
             + f"\n\n{period_line}"
         )
-        return {"final_answer": final_ans, "warnings": all_warnings}
+        final_ans = normalize_spaces(final_ans)
+        short_ans, details_md = extract_structured_answers(final_ans)
+
+        patch = {
+            "final_answer": final_ans,
+            "short_answer": short_ans,
+            "details_markdown": details_md,
+            "warnings": all_warnings,
+            "assumptions": all_assumptions,
+            "previous_query": query,
+            "previous_tasks": [
+                {
+                    "agent": t.agent,
+                    "tool": (
+                        results[t.id].tool_calls_made[0]
+                        if results.get(t.id) and getattr(results[t.id], "tool_calls_made", None) and results[t.id].tool_calls_made
+                        else t.tool_hint or getattr(t, "tool", None)
+                    ),
+                }
+                for t in (plan.tasks if plan else [])
+                if t.agent != "data"
+            ],
+        }
+        if plan and plan.scope:
+            patch["previous_scope"] = plan.scope.model_dump()
+        if plan and plan.intent:
+            patch["previous_intent"] = plan.intent.value if hasattr(plan.intent, "value") else str(plan.intent)
+        return patch
