@@ -1,32 +1,18 @@
 import React, { useState, useRef, useEffect, useMemo } from 'react';
+import { useOutletContext } from 'react-router-dom';
 import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { sendChatQuery } from '../services/api';
-import Card from '../components/common/Card';
-import Badge from '../components/common/Badge';
 import Skeleton from '../components/common/Skeleton';
 import PlotlyChart from '../components/common/PlotlyChart';
 import ErrorCard from '../components/common/ErrorCard';
 
 import {
   Send,
-  Sparkles,
-  Bot,
-  User,
-  Cpu,
-  Layers,
-  Table as TableIcon,
-  BarChart3,
   AlertTriangle,
-  RotateCcw,
-  Clock,
-  CheckCircle2,
-  AlertCircle,
-  HelpCircle,
+  PanelRightClose,
+  PanelRightOpen,
   ArrowRight,
-  Database,
-  Workflow,
-  ChevronDown,
-  ChevronUp,
 } from 'lucide-react';
 
 const EXAMPLE_QUESTIONS = [
@@ -44,13 +30,26 @@ const DEFAULT_FOLLOW_UPS = [
   'Compare with Plant 3',
 ];
 
+const isNumericValue = (val) => {
+  if (typeof val === 'number') return true;
+  if (typeof val === 'string') {
+    const clean = val.trim().replace(/[%$,]/g, '');
+    return clean !== '' && !isNaN(Number(clean));
+  }
+  return false;
+};
+
 export default function ChatPage() {
+  const outletContext = useOutletContext() || {};
+  const mode = outletContext.mode || 'replay';
+  const newChatTrigger = outletContext.newChatTrigger || 0;
+
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState('');
-  const [mode, setMode] = useState('replay'); // 'replay' | 'live'
   const [loading, setLoading] = useState(false);
   const [lastQuery, setLastQuery] = useState('');
-  const [expandedTables, setExpandedTables] = useState({});
+  const [selectedMessageId, setSelectedMessageId] = useState(null);
+  const [isPanelOpen, setIsPanelOpen] = useState(true);
 
   // Thread ID persisted in localStorage
   const [threadId, setThreadId] = useState(() => {
@@ -72,12 +71,22 @@ export default function ChatPage() {
     scrollToBottom();
   }, [messages, loading]);
 
+  // Handle New Chat triggered from TopBar
+  const prevTriggerRef = useRef(newChatTrigger);
+  useEffect(() => {
+    if (newChatTrigger !== prevTriggerRef.current) {
+      prevTriggerRef.current = newChatTrigger;
+      handleNewChat();
+    }
+  }, [newChatTrigger]);
+
   const handleNewChat = () => {
     const newId = 'thread_' + Math.random().toString(36).substring(2, 10);
     localStorage.setItem('solar_chat_thread_id', newId);
     setThreadId(newId);
     setMessages([]);
     setLastQuery('');
+    setSelectedMessageId(null);
   };
 
   const handleSubmit = async (queryText) => {
@@ -86,6 +95,7 @@ export default function ChatPage() {
 
     setLastQuery(q);
     const userMessage = {
+      id: 'usr_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6),
       role: 'user',
       content: q,
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
@@ -102,17 +112,34 @@ export default function ChatPage() {
         mode,
       });
 
+      // Store the trace on each assistant message
+      const trace = {
+        plan: response.plan || [],
+        llm_calls: response.llm_calls || { total: 0, budget: 12, planner: 0, agent: 0, synthesizer: 0 },
+        elapsed_ms: response.elapsed_ms || null,
+      };
+
+      const msgId = 'asst_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6);
       const assistantMessage = {
+        id: msgId,
         role: 'assistant',
         queryAsked: q,
         data: response,
+        trace,
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
       };
 
       setMessages((prev) => [...prev, assistantMessage]);
+      setSelectedMessageId(msgId);
     } catch (err) {
-      const isBudget = err.status === 429 || (err.message && err.message.includes('429')) || (err.message && err.message.toLowerCase().includes('budget'));
+      const isBudget =
+        err.status === 429 ||
+        (err.message && err.message.includes('429')) ||
+        (err.message && err.message.toLowerCase().includes('budget'));
+
+      const msgId = 'err_' + Date.now();
       const assistantMessage = {
+        id: msgId,
         role: 'assistant',
         queryAsked: q,
         error: err.data?.error || {
@@ -120,10 +147,16 @@ export default function ChatPage() {
           type: isBudget ? 'RateLimitOrBudgetExceeded' : 'ExecutionError',
           message: err.message || 'An error occurred during query execution.',
         },
+        trace: {
+          plan: [],
+          llm_calls: { total: 0, budget: 12, planner: 0, agent: 0, synthesizer: 0 },
+          elapsed_ms: null,
+        },
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
       };
 
       setMessages((prev) => [...prev, assistantMessage]);
+      setSelectedMessageId(msgId);
     } finally {
       setLoading(false);
     }
@@ -136,298 +169,256 @@ export default function ChatPage() {
     }
   };
 
-  // Extract latest execution result for the right-hand "How it worked" panel
-  const latestExecution = useMemo(() => {
+  // Find trace of the selected answer, defaulting to the latest assistant message
+  const activeMessage = useMemo(() => {
+    if (selectedMessageId) {
+      const found = messages.find((m) => m.id === selectedMessageId);
+      if (found && found.role === 'assistant') return found;
+    }
     for (let i = messages.length - 1; i >= 0; i--) {
-      if (messages[i].role === 'assistant' && messages[i].data) {
-        return messages[i].data;
+      if (messages[i].role === 'assistant' && messages[i].trace) {
+        return messages[i];
       }
     }
     return null;
-  }, [messages]);
+  }, [messages, selectedMessageId]);
 
-  const toggleTableExpand = (msgIdx, tableIdx) => {
-    const key = `${msgIdx}_${tableIdx}`;
-    setExpandedTables((prev) => ({ ...prev, [key]: !prev[key] }));
-  };
+  const activeTrace = activeMessage?.trace || null;
 
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 h-[calc(100vh-6.5rem)] max-w-7xl mx-auto">
+    <div className="flex gap-5 h-[calc(100vh-6.5rem)] max-w-7xl mx-auto">
       {/* =========================================================================
-          LEFT COLUMN: Chat Interface (~65% width)
+          LEFT / MAIN COLUMN: Chat Interface
       ========================================================================= */}
-      <div className="lg:col-span-8 flex flex-col h-full bg-surface border border-border rounded-xl shadow-sm overflow-hidden">
-        {/* Top Session Bar */}
-        <div className="px-5 py-3 border-b border-border flex items-center justify-between bg-card/40 shrink-0">
-          <div className="flex items-center gap-2.5">
-            <div className="p-1.5 rounded-lg bg-primary/15 text-primary border border-primary/30">
-              <Sparkles className="w-4 h-4" />
-            </div>
-            <div>
-              <span className="text-xs font-semibold text-text">Session:</span>
-              <span className="ml-1.5 font-mono text-[11px] text-muted bg-surface px-2 py-0.5 rounded border border-border">
-                {threadId}
-              </span>
-            </div>
-          </div>
-
-          <div className="flex items-center gap-2.5">
-            {/* Mode switch */}
-            <div className="flex items-center bg-surface border border-border rounded-lg p-0.5 text-xs font-medium">
-              <button
-                onClick={() => setMode('replay')}
-                className={`px-2.5 py-1 rounded-md transition-colors ${
-                  mode === 'replay'
-                    ? 'bg-primary text-bg font-semibold shadow-sm'
-                    : 'text-muted hover:text-text'
-                }`}
-                title="Uses recorded offline golden responses"
-              >
-                Replay Mode
-              </button>
-              <button
-                onClick={() => setMode('live')}
-                className={`px-2.5 py-1 rounded-md transition-colors ${
-                  mode === 'live'
-                    ? 'bg-teal text-bg font-semibold shadow-sm'
-                    : 'text-muted hover:text-text'
-                }`}
-                title="Executes live LLM calls via API"
-              >
-                Live API
-              </button>
-            </div>
-
-            {/* New Chat Button */}
-            <button
-              onClick={handleNewChat}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-card border border-border hover:border-primary text-text hover:text-primary transition-all"
-            >
-              <RotateCcw className="w-3.5 h-3.5" />
-              <span>New chat</span>
-            </button>
-          </div>
-        </div>
-
-        {/* Message Stream */}
-        <div className="flex-1 overflow-y-auto p-5 space-y-6">
+      <div className="flex-1 flex flex-col h-full bg-white border border-[#E2E8F0] rounded-lg overflow-hidden min-w-0">
+        {/* Chat message stream */}
+        <div className="flex-1 overflow-y-auto p-5 space-y-5 bg-white">
           {messages.length === 0 ? (
-            /* Empty State: 5 Example Question Chips */
+            /* Empty State: Heading + 5 Example Chips */
             <div className="h-full flex flex-col items-center justify-center text-center p-6 max-w-xl mx-auto">
-              <div className="w-14 h-14 rounded-2xl bg-card border border-border flex items-center justify-center text-primary mb-3 shadow-md">
-                <Bot className="w-7 h-7" />
-              </div>
-              <h3 className="text-base font-bold text-text mb-1">Solar Plant Operations Assistant</h3>
-              <p className="text-xs text-muted mb-6 leading-relaxed">
-                Ask natural language questions about generation, inverter faults, soiling, and weather impact. Numbers come directly from database tools and an automated grounding check flags mismatches.
+              <h2 className="text-xl font-bold text-[#0F172A] mb-2">
+                Ask about your solar plants
+              </h2>
+              <p className="text-xs text-[#64748B] mb-6 leading-relaxed max-w-md">
+                Query performance ratios, inverter abnormalities, soiling losses, and weather patterns. Responses are grounded directly against plant databases and operational telemetry.
               </p>
 
               <div className="w-full space-y-2 text-left">
-                <p className="text-[11px] font-semibold uppercase tracking-wider text-muted px-1">
-                  Suggested Questions:
-                </p>
-                <div className="space-y-1.5">
-                  {EXAMPLE_QUESTIONS.map((q, idx) => (
-                    <button
-                      key={idx}
-                      onClick={() => handleSubmit(q)}
-                      className="w-full p-2.5 rounded-lg bg-card hover:bg-card/80 border border-border text-xs text-text hover:text-primary transition-all flex items-center justify-between text-left group"
-                    >
-                      <span className="flex items-center gap-2">
-                        <HelpCircle className="w-3.5 h-3.5 text-primary shrink-0" />
-                        <span>{q}</span>
-                      </span>
-                      <ArrowRight className="w-3.5 h-3.5 text-muted group-hover:text-primary group-hover:translate-x-0.5 transition-all" />
-                    </button>
-                  ))}
-                </div>
+                {EXAMPLE_QUESTIONS.map((q, idx) => (
+                  <button
+                    key={idx}
+                    type="button"
+                    onClick={() => handleSubmit(q)}
+                    className="w-full p-3 rounded-lg bg-white hover:bg-[#F8FAFC] border border-[#E2E8F0] text-xs text-[#0F172A] hover:text-[#2563EB] transition-colors flex items-center justify-between group"
+                  >
+                    <span className="font-medium text-left mr-2 text-[#0F172A] group-hover:text-[#2563EB]">
+                      {q}
+                    </span>
+                    <ArrowRight className="w-3.5 h-3.5 text-[#64748B] group-hover:text-[#2563EB] group-hover:translate-x-0.5 transition-transform shrink-0" />
+                  </button>
+                ))}
               </div>
             </div>
           ) : (
-            messages.map((msg, index) => (
-              <div key={index} className="space-y-3">
+            messages.map((msg) => (
+              <div key={msg.id} className="space-y-3">
                 {msg.role === 'user' ? (
-                  /* User Bubble */
-                  <div className="flex items-start gap-3 justify-end">
-                    <div className="max-w-xl bg-primary/10 border border-primary/20 rounded-2xl rounded-tr-sm px-4 py-3 shadow-sm">
-                      <p className="text-sm text-text leading-relaxed whitespace-pre-wrap">{msg.content}</p>
-                      <div className="flex justify-end mt-1 text-[10px] text-muted">{msg.timestamp}</div>
-                    </div>
-                    <div className="w-8 h-8 rounded-lg bg-card border border-border flex items-center justify-center text-primary shrink-0 mt-0.5">
-                      <User className="w-4 h-4" />
+                  /* User message: right-aligned, tint background, no avatar */
+                  <div className="flex justify-end">
+                    <div className="max-w-xl bg-[#EFF6FF] border border-[#2563EB]/20 rounded-lg px-4 py-3">
+                      <p className="text-sm text-[#0F172A] whitespace-pre-wrap leading-relaxed">
+                        {msg.content}
+                      </p>
+                      <div className="flex justify-end mt-1 text-[11px] text-[#64748B]">
+                        {msg.timestamp}
+                      </div>
                     </div>
                   </div>
                 ) : (
-                  /* Assistant Bubble */
-                  <div className="flex items-start gap-3">
-                    <div className="w-8 h-8 rounded-lg bg-card border border-border flex items-center justify-center text-teal shrink-0 mt-0.5">
-                      <Bot className="w-4 h-4" />
-                    </div>
+                  /* Assistant message: white bordered card, no avatar */
+                  <div className="bg-white border border-[#E2E8F0] rounded-lg p-5 space-y-4">
+                    {msg.error ? (
+                      <ErrorCard
+                        title={msg.error.type || 'Execution Error'}
+                        message={msg.error.message}
+                        onRetry={() => handleSubmit(msg.queryAsked || lastQuery)}
+                      />
+                    ) : (
+                      <>
+                        {/* 1. short_answer in semibold 16px */}
+                        {msg.data?.short_answer && (
+                          <div className="text-base font-semibold text-[#0F172A] leading-snug">
+                            {msg.data.short_answer}
+                          </div>
+                        )}
 
-                    <div className="flex-1 bg-card border border-border rounded-2xl rounded-tl-sm p-5 space-y-4 shadow-sm">
-                      {msg.error ? (
-                        /* Error Card with Retry Button for 429 and Budget Errors */
-                        <ErrorCard
-                          title={msg.error.type || 'Execution Error'}
-                          message={msg.error.message}
-                          onRetry={() => handleSubmit(msg.queryAsked || lastQuery)}
-                        />
-                      ) : (
-                        <>
-                          {/* Yellow Warnings Banner if warnings exist */}
-                          {msg.data?.warnings && msg.data.warnings.length > 0 && (
-                            <div className="p-3 rounded-lg bg-warning/15 border border-warning/30 text-warning text-xs space-y-1">
-                              <div className="font-semibold flex items-center gap-1.5">
-                                <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
-                                <span>Grounding & Calibration Warnings:</span>
-                              </div>
-                              <ul className="list-disc pl-5 text-muted space-y-0.5">
-                                {msg.data.warnings.map((w, wIdx) => (
-                                  <li key={wIdx}>{w}</li>
-                                ))}
-                              </ul>
-                            </div>
-                          )}
-
-                          {/* Structured Short Answer & Supporting Markdown */}
-                          {msg.data?.short_answer ? (
-                            <div className="space-y-3">
-                              <div className="p-3.5 rounded-lg bg-card/60 border border-primary/20 text-text leading-relaxed text-sm font-medium">
-                                <div className="text-[11px] font-bold text-primary uppercase tracking-wider mb-1 flex items-center gap-1.5">
-                                  <Sparkles className="w-3.5 h-3.5 text-primary" /> Key Finding
-                                </div>
-                                {msg.data.short_answer}
-                              </div>
-                              {msg.data.details_markdown && (
-                                <div className="prose prose-invert prose-sm max-w-none text-text leading-relaxed text-sm">
-                                  <ReactMarkdown>{msg.data.details_markdown}</ReactMarkdown>
-                                </div>
-                              )}
-                              {msg.data.assumptions && msg.data.assumptions.length > 0 && (
-                                <div className="text-[11px] text-muted space-y-0.5 pt-1">
-                                  <span className="font-semibold text-muted/90">Assumptions:</span>
-                                  <ul className="list-disc pl-4 space-y-0.5 text-muted/80">
-                                    {msg.data.assumptions.map((a, aIdx) => (
-                                      <li key={aIdx}>{a}</li>
-                                    ))}
-                                  </ul>
-                                </div>
-                              )}
-                            </div>
-                          ) : (
-                            <div className="prose prose-invert prose-sm max-w-none text-text leading-relaxed text-sm">
-                              <ReactMarkdown>{msg.data?.answer_markdown || 'No answer generated.'}</ReactMarkdown>
-                            </div>
-                          )}
-
-                          {/* Embedded Data Tables directly under answer */}
-                          {msg.data?.tables && msg.data.tables.length > 0 && (
-                            <div className="space-y-2 pt-2 border-t border-border/40">
-                              <span className="text-xs font-semibold text-muted uppercase tracking-wider flex items-center gap-1.5">
-                                <TableIcon className="w-3.5 h-3.5 text-teal" />
-                                Telemetry Tables ({msg.data.tables.length})
-                              </span>
-
-                              {msg.data.tables.map((table, tIdx) => {
-                                const isExpanded = !!expandedTables[`${index}_${tIdx}`];
-                                return (
-                                  <div key={tIdx} className="bg-surface border border-border rounded-lg overflow-hidden text-xs">
-                                    <button
-                                      onClick={() => toggleTableExpand(index, tIdx)}
-                                      className="w-full px-3 py-2 flex items-center justify-between text-left hover:bg-card/50 transition-colors font-medium text-text"
-                                    >
-                                      <span>{table.title}</span>
-                                      {isExpanded ? (
-                                        <ChevronUp className="w-3.5 h-3.5 text-muted" />
-                                      ) : (
-                                        <ChevronDown className="w-3.5 h-3.5 text-muted" />
-                                      )}
-                                    </button>
-
-                                    {isExpanded && (
-                                      <div className="overflow-x-auto border-t border-border/40 p-2 max-h-56">
-                                        <table className="w-full text-left">
-                                          <thead>
-                                            <tr className="border-b border-border/80 text-muted">
-                                              {table.columns.map((col, cIdx) => (
-                                                <th key={cIdx} className="pb-1.5 px-2 font-medium whitespace-nowrap">
-                                                  {col}
-                                                </th>
-                                              ))}
-                                            </tr>
-                                          </thead>
-                                          <tbody className="divide-y divide-border/20">
-                                            {table.rows.map((row, rIdx) => (
-                                              <tr key={rIdx} className="hover:bg-card/40">
-                                                {row.map((val, vIdx) => (
-                                                  <td key={vIdx} className="py-1.5 px-2 font-mono text-muted whitespace-nowrap">
-                                                    {val !== null ? String(val) : '—'}
-                                                  </td>
-                                                ))}
-                                              </tr>
-                                            ))}
-                                          </tbody>
-                                        </table>
-                                      </div>
-                                    )}
+                        {/* 2. Each table from tables as a clean HTML table */}
+                        {msg.data?.tables && msg.data.tables.length > 0 && (
+                          <div className="space-y-3">
+                            {msg.data.tables.map((table, tIdx) => (
+                              <div
+                                key={tIdx}
+                                className="border border-[#E2E8F0] rounded-lg overflow-hidden bg-white"
+                              >
+                                {table.title && (
+                                  <div className="px-3 py-2 bg-[#F8FAFC] border-b border-[#E2E8F0] text-xs font-semibold text-[#0F172A]">
+                                    {table.title}
                                   </div>
-                                );
-                              })}
-                            </div>
-                          )}
-
-                          {/* Embedded Visualizations directly under answer */}
-                          {msg.data?.charts && msg.data.charts.length > 0 && (
-                            <div className="space-y-3 pt-2 border-t border-border/40">
-                              <span className="text-xs font-semibold text-muted uppercase tracking-wider flex items-center gap-1.5">
-                                <BarChart3 className="w-3.5 h-3.5 text-primary" />
-                                Visualizations
-                              </span>
-                              {msg.data.charts.map((chartSpec, cIdx) => (
-                                <div key={cIdx} className="bg-surface border border-border rounded-xl p-3">
-                                  <PlotlyChart figureJson={chartSpec} />
+                                )}
+                                <div className="overflow-x-auto max-h-64">
+                                  <table className="w-full border-collapse text-xs">
+                                    <thead className="bg-[#F8FAFC] border-b border-[#E2E8F0] text-[#64748B]">
+                                      <tr>
+                                        {table.columns.map((col, cIdx) => (
+                                          <th
+                                            key={cIdx}
+                                            className="px-3 py-2 text-left font-medium whitespace-nowrap text-[#64748B]"
+                                          >
+                                            {col}
+                                          </th>
+                                        ))}
+                                      </tr>
+                                    </thead>
+                                    <tbody className="divide-y divide-[#E2E8F0]">
+                                      {table.rows.map((row, rIdx) => (
+                                        <tr
+                                          key={rIdx}
+                                          className="hover:bg-[#F8FAFC] transition-colors"
+                                        >
+                                          {row.map((val, vIdx) => {
+                                            const isNum = isNumericValue(val);
+                                            return (
+                                              <td
+                                                key={vIdx}
+                                                className={`px-3 py-2 ${
+                                                  isNum
+                                                    ? 'text-right font-mono tabular-nums text-[#0F172A]'
+                                                    : 'text-left text-[#0F172A]'
+                                                } whitespace-nowrap`}
+                                              >
+                                                {val !== null && val !== undefined ? String(val) : '—'}
+                                              </td>
+                                            );
+                                          })}
+                                        </tr>
+                                      ))}
+                                    </tbody>
+                                  </table>
                                 </div>
-                              ))}
-                            </div>
-                          )}
+                              </div>
+                            ))}
+                          </div>
+                        )}
 
-                          {/* Follow-up question chips under each answer */}
-                          <div className="pt-2 border-t border-border/40 space-y-1.5">
-                            <span className="text-[11px] font-semibold text-muted uppercase tracking-wider">
-                              Follow-up questions:
-                            </span>
-                            <div className="flex flex-wrap gap-1.5">
-                              {DEFAULT_FOLLOW_UPS.map((chip, fIdx) => (
-                                <button
-                                  key={fIdx}
-                                  onClick={() => handleSubmit(chip)}
-                                  className="text-xs px-2.5 py-1 rounded-md bg-surface hover:bg-surface/80 border border-border text-muted hover:text-primary transition-all text-left"
-                                >
-                                  {chip}
-                                </button>
+                        {/* 3. details_markdown (rendered with remark-gfm) */}
+                        {msg.data?.details_markdown ? (
+                          <div className="prose prose-sm max-w-none text-[#0F172A] leading-relaxed text-sm">
+                            <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                              {msg.data.details_markdown}
+                            </ReactMarkdown>
+                          </div>
+                        ) : msg.data?.answer_markdown ? (
+                          <div className="prose prose-sm max-w-none text-[#0F172A] leading-relaxed text-sm">
+                            <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                              {msg.data.answer_markdown}
+                            </ReactMarkdown>
+                          </div>
+                        ) : null}
+
+                        {/* 4. assumptions in small muted text */}
+                        {msg.data?.assumptions && msg.data.assumptions.length > 0 && (
+                          <div className="text-xs text-[#64748B] space-y-1 pt-1">
+                            <span className="font-medium text-[#64748B]">Assumptions:</span>
+                            <ul className="list-disc pl-4 space-y-0.5">
+                              {msg.data.assumptions.map((a, aIdx) => (
+                                <li key={aIdx}>{a}</li>
                               ))}
+                            </ul>
+                          </div>
+                        )}
+
+                        {/* 5. warnings in a warning-coloured banner (only if present) */}
+                        {msg.data?.warnings && msg.data.warnings.length > 0 && (
+                          <div className="p-3 rounded-lg bg-[#FFFBEB] border border-[#D97706]/30 text-[#D97706] text-xs space-y-1">
+                            <div className="font-semibold flex items-center gap-1.5">
+                              <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                              <span>Warnings:</span>
                             </div>
+                            <ul className="list-disc pl-4 space-y-0.5 text-[#B45309]">
+                              {msg.data.warnings.map((w, wIdx) => (
+                                <li key={wIdx}>{w}</li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+
+                        {/* Plotly charts on white cards */}
+                        {msg.data?.charts && msg.data.charts.length > 0 && (
+                          <div className="space-y-3 pt-1">
+                            {msg.data.charts.map((chartSpec, cIdx) => (
+                              <PlotlyChart key={cIdx} figureJson={chartSpec} />
+                            ))}
+                          </div>
+                        )}
+
+                        {/* Follow-up question chips */}
+                        <div className="pt-2 flex flex-wrap items-center gap-1.5 border-t border-[#E2E8F0]">
+                          <span className="text-xs text-[#64748B] font-medium mr-1">
+                            Follow up:
+                          </span>
+                          {DEFAULT_FOLLOW_UPS.map((chip, fIdx) => (
+                            <button
+                              key={fIdx}
+                              type="button"
+                              onClick={() => handleSubmit(chip)}
+                              className="text-xs px-2.5 py-1 rounded-lg bg-[#F8FAFC] hover:bg-[#EFF6FF] border border-[#E2E8F0] hover:border-[#2563EB] text-[#0F172A] hover:text-[#2563EB] transition-colors"
+                            >
+                              {chip}
+                            </button>
+                          ))}
+                        </div>
+
+                        {/* 6. Footer with "Period analysed" and source chips */}
+                        <div className="pt-2 flex flex-wrap items-center justify-between gap-2 text-xs text-[#64748B] border-t border-[#E2E8F0]">
+                          <div className="flex flex-wrap items-center gap-3">
+                            {msg.data?.period && (
+                              <span>
+                                <strong className="text-[#0F172A] font-medium">Period analysed:</strong>{' '}
+                                {msg.data.period.start} → {msg.data.period.end}
+                              </span>
+                            )}
+                            {msg.data?.sources && msg.data.sources.length > 0 && (
+                              <div className="flex items-center gap-1.5">
+                                <span>Sources:</span>
+                                {msg.data.sources.map((src, sIdx) => (
+                                  <span
+                                    key={sIdx}
+                                    className="px-2 py-0.5 rounded bg-[#F1F5F9] text-[#64748B] text-[11px] border border-[#E2E8F0]"
+                                  >
+                                    {src}
+                                  </span>
+                                ))}
+                              </div>
+                            )}
                           </div>
 
-                          {/* "Period analysed / Sources" footer */}
-                          <div className="pt-2 flex flex-wrap items-center justify-between gap-2 text-[11px] text-muted border-t border-border/40">
-                            <div className="flex items-center gap-3">
-                              {msg.data?.period && (
-                                <span>
-                                  <strong>Period analysed:</strong> {msg.data.period.start} → {msg.data.period.end}
-                                </span>
-                              )}
-                              {msg.data?.sources && msg.data.sources.length > 0 && (
-                                <span>
-                                  <strong>Sources:</strong> {msg.data.sources.join(', ')}
-                                </span>
-                              )}
-                            </div>
-                            <span>{msg.timestamp}</span>
+                          <div className="flex items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={() => setSelectedMessageId(msg.id)}
+                              className={`text-[11px] font-medium px-2 py-0.5 rounded transition-colors ${
+                                activeMessage?.id === msg.id
+                                  ? 'bg-[#EFF6FF] text-[#2563EB] border border-[#2563EB]/30'
+                                  : 'text-[#64748B] hover:text-[#0F172A] hover:bg-[#F8FAFC] border border-transparent'
+                              }`}
+                            >
+                              {activeMessage?.id === msg.id ? 'Viewing Trace' : 'Inspect Trace'}
+                            </button>
+                            <span className="text-[11px] text-[#64748B]">{msg.timestamp}</span>
                           </div>
-                        </>
-                      )}
-                    </div>
+                        </div>
+                      </>
+                    )}
                   </div>
                 )}
               </div>
@@ -436,19 +427,14 @@ export default function ChatPage() {
 
           {/* Loading Skeleton */}
           {loading && (
-            <div className="flex items-start gap-3">
-              <div className="w-8 h-8 rounded-lg bg-card border border-border flex items-center justify-center text-teal shrink-0">
-                <Bot className="w-4 h-4 animate-spin" />
+            <div className="bg-white border border-[#E2E8F0] rounded-lg p-5 space-y-3">
+              <div className="flex items-center gap-2 text-xs text-[#0F172A] font-medium">
+                <span className="w-2 h-2 rounded-full bg-[#2563EB] animate-ping" />
+                <span>Running multi-agent analysis...</span>
               </div>
-              <div className="flex-1 bg-card border border-border rounded-2xl rounded-tl-sm p-5 space-y-3">
-                <div className="flex items-center gap-2 text-xs text-text font-medium">
-                  <span className="w-2 h-2 rounded-full bg-primary animate-ping" />
-                  <span>Planning and running multi-agent tools...</span>
-                </div>
-                <Skeleton className="w-3/4 h-4" />
-                <Skeleton className="w-full h-4" />
-                <Skeleton className="w-2/3 h-4" />
-              </div>
+              <Skeleton className="w-3/4 h-4 bg-[#E2E8F0]" />
+              <Skeleton className="w-full h-4 bg-[#E2E8F0]" />
+              <Skeleton className="w-2/3 h-4 bg-[#E2E8F0]" />
             </div>
           )}
 
@@ -456,20 +442,21 @@ export default function ChatPage() {
         </div>
 
         {/* Input Bar */}
-        <div className="p-3 border-t border-border bg-card/50">
+        <div className="p-3 border-t border-[#E2E8F0] bg-white">
           <div className="flex items-center gap-2">
             <textarea
               rows={1}
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
-              placeholder="Ask a question about solar plant telemetry (press Enter to send)..."
-              className="flex-1 bg-surface border border-border rounded-lg px-3.5 py-2.5 text-xs sm:text-sm text-text placeholder:text-muted/60 focus:outline-none focus:border-primary resize-none transition-colors"
+              placeholder="Ask a question about solar plant telemetry (Enter to send)..."
+              className="flex-1 bg-white border border-[#E2E8F0] rounded-lg px-3.5 py-2 text-sm text-[#0F172A] placeholder:text-[#64748B] focus:outline-none focus:border-[#2563EB] resize-none transition-colors"
             />
             <button
+              type="button"
               onClick={() => handleSubmit()}
               disabled={!input.trim() || loading}
-              className="px-4 py-2.5 rounded-lg bg-primary hover:bg-primary/90 text-bg font-semibold text-xs sm:text-sm inline-flex items-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed transition-all shadow-sm"
+              className="px-4 py-2 rounded-lg bg-[#2563EB] hover:bg-[#1D4ED8] text-white font-medium text-sm inline-flex items-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
             >
               <Send className="w-4 h-4" />
               <span>Send</span>
@@ -479,175 +466,178 @@ export default function ChatPage() {
       </div>
 
       {/* =========================================================================
-          RIGHT COLUMN: Always-Visible "How it worked" Panel (~35% width)
+          RIGHT COLUMN: 320px Collapsible Trace Panel
       ========================================================================= */}
-      <div className="lg:col-span-4 flex flex-col h-full bg-surface border border-border rounded-xl shadow-sm overflow-hidden">
-        {/* Panel Header */}
-        <div className="px-5 py-3 border-b border-border flex items-center justify-between bg-card/40 shrink-0">
-          <div className="flex items-center gap-2">
-            <Cpu className="w-4 h-4 text-violet" />
-            <h3 className="text-sm font-bold text-text">How it worked</h3>
+      {isPanelOpen ? (
+        <aside className="w-[320px] min-w-[320px] max-w-[320px] flex flex-col h-full bg-white border border-[#E2E8F0] rounded-lg overflow-hidden shrink-0">
+          {/* Panel Header */}
+          <div className="px-4 py-3 border-b border-[#E2E8F0] flex items-center justify-between bg-white shrink-0">
+            <div className="flex items-center gap-2">
+              <h3 className="text-sm font-semibold text-[#0F172A]">Execution Trace</h3>
+              {activeMessage && (
+                <span className="text-[10px] text-[#64748B] font-mono bg-[#F8FAFC] px-1.5 py-0.5 rounded border border-[#E2E8F0]">
+                  {activeMessage.timestamp}
+                </span>
+              )}
+            </div>
+            <button
+              type="button"
+              onClick={() => setIsPanelOpen(false)}
+              className="p-1 rounded hover:bg-[#F8FAFC] text-[#64748B] hover:text-[#0F172A] transition-colors"
+              title="Collapse panel"
+            >
+              <PanelRightClose className="w-4 h-4" />
+            </button>
           </div>
-          <Badge variant="violet">LangGraph Trace</Badge>
-        </div>
 
-        {/* Panel Content (Scrollable) */}
-        <div className="flex-1 overflow-y-auto p-5 space-y-6">
-          {latestExecution ? (
-            <>
-              {/* LLM Call Budget Progress Bar */}
-              <div className="bg-card border border-border rounded-xl p-4 space-y-3">
-                <div className="flex items-center justify-between text-xs">
-                  <span className="font-semibold text-text">LLM Call Budget</span>
-                  <span className="font-mono text-xs font-bold text-primary">
-                    {latestExecution.llm_calls?.total || 0} / {latestExecution.llm_calls?.budget || 12}
-                  </span>
-                </div>
-
-                {/* Progress Bar out of 12 */}
-                <div className="w-full bg-surface rounded-full h-2 overflow-hidden border border-border/80">
-                  <div
-                    className={`h-full transition-all duration-500 ${
-                      (latestExecution.llm_calls?.total || 0) >= 12
-                        ? 'bg-danger'
-                        : (latestExecution.llm_calls?.total || 0) >= 9
-                        ? 'bg-warning'
-                        : 'bg-primary'
-                    }`}
-                    style={{
-                      width: `${Math.min(
-                        100,
-                        ((latestExecution.llm_calls?.total || 0) /
-                          (latestExecution.llm_calls?.budget || 12)) *
-                          100
-                      )}%`,
-                    }}
-                  />
-                </div>
-
-                {/* Role Breakdown & Timings */}
-                <div className="grid grid-cols-3 gap-2 pt-1 text-center text-[11px]">
-                  <div className="p-2 rounded-lg bg-surface border border-border/60">
-                    <div className="text-muted text-[10px]">Planner</div>
-                    <div className="font-mono font-bold text-text mt-0.5">
-                      {latestExecution.llm_calls?.planner || 0}
-                    </div>
-                  </div>
-                  <div className="p-2 rounded-lg bg-surface border border-border/60">
-                    <div className="text-muted text-[10px]">Agents</div>
-                    <div className="font-mono font-bold text-text mt-0.5">
-                      {latestExecution.llm_calls?.agent || 0}
-                    </div>
-                  </div>
-                  <div className="p-2 rounded-lg bg-surface border border-border/60">
-                    <div className="text-muted text-[10px]">Synthesizer</div>
-                    <div className="font-mono font-bold text-text mt-0.5">
-                      {latestExecution.llm_calls?.synthesizer || 0}
-                    </div>
-                  </div>
-                </div>
-
-                {latestExecution.elapsed_ms && (
-                  <div className="flex items-center justify-between text-[11px] text-muted pt-1 border-t border-border/40">
-                    <span className="flex items-center gap-1">
-                      <Clock className="w-3 h-3 text-muted" /> Elapsed Time:
-                    </span>
-                    <span className="font-mono font-medium text-text">
-                      {latestExecution.elapsed_ms} ms
+          {/* Panel Content */}
+          <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-white">
+            {activeTrace ? (
+              <>
+                {/* Progress bar out of 12 */}
+                <div className="space-y-1.5 bg-[#F8FAFC] border border-[#E2E8F0] rounded-lg p-3">
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="font-medium text-[#0F172A]">LLM Call Budget</span>
+                    <span className="font-mono text-xs font-semibold text-[#2563EB]">
+                      {activeTrace.llm_calls?.total || 0} / 12
                     </span>
                   </div>
-                )}
-              </div>
 
-              {/* Plan Steps (DAG Tasks) */}
-              <div className="bg-card border border-border rounded-xl p-4 space-y-3">
-                <div className="flex items-center justify-between">
-                  <h4 className="text-xs font-semibold text-text flex items-center gap-1.5">
-                    <Layers className="w-3.5 h-3.5 text-teal" />
-                    <span>DAG Plan Steps</span>
-                  </h4>
-                  <span className="text-[11px] text-muted">
-                    {latestExecution.plan?.length || 0} steps
-                  </span>
+                  <div className="w-full bg-[#E2E8F0] rounded-full h-2 overflow-hidden">
+                    <div
+                      className={`h-full transition-all duration-300 ${
+                        (activeTrace.llm_calls?.total || 0) >= 12
+                          ? 'bg-[#DC2626]'
+                          : (activeTrace.llm_calls?.total || 0) >= 9
+                          ? 'bg-[#D97706]'
+                          : 'bg-[#2563EB]'
+                      }`}
+                      style={{
+                        width: `${Math.min(
+                          100,
+                          (((activeTrace.llm_calls?.total || 0) / 12) * 100)
+                        )}%`,
+                      }}
+                    />
+                  </div>
+
+                  {/* Calls by role */}
+                  <div className="grid grid-cols-3 gap-1.5 pt-2 text-center text-xs">
+                    <div className="p-1.5 rounded bg-white border border-[#E2E8F0]">
+                      <div className="text-[10px] text-[#64748B]">Planner</div>
+                      <div className="font-mono font-semibold text-[#0F172A] mt-0.5">
+                        {activeTrace.llm_calls?.planner || 0}
+                      </div>
+                    </div>
+                    <div className="p-1.5 rounded bg-white border border-[#E2E8F0]">
+                      <div className="text-[10px] text-[#64748B]">Agents</div>
+                      <div className="font-mono font-semibold text-[#0F172A] mt-0.5">
+                        {activeTrace.llm_calls?.agent || 0}
+                      </div>
+                    </div>
+                    <div className="p-1.5 rounded bg-white border border-[#E2E8F0]">
+                      <div className="text-[10px] text-[#64748B]">Synthesizer</div>
+                      <div className="font-mono font-semibold text-[#0F172A] mt-0.5">
+                        {activeTrace.llm_calls?.synthesizer || 0}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Elapsed time */}
+                  {activeTrace.elapsed_ms && (
+                    <div className="flex items-center justify-between text-[11px] text-[#64748B] pt-2 border-t border-[#E2E8F0] mt-1">
+                      <span>Elapsed time:</span>
+                      <span className="font-mono font-medium text-[#0F172A]">
+                        {activeTrace.elapsed_ms} ms
+                      </span>
+                    </div>
+                  )}
                 </div>
 
-                {latestExecution.plan && latestExecution.plan.length > 0 ? (
-                  <div className="space-y-2">
-                    {latestExecution.plan.map((step) => {
-                      let statusVariant = 'muted';
-                      if (step.status === 'done') statusVariant = 'success';
-                      if (step.status === 'failed') statusVariant = 'danger';
-                      if (step.status === 'running') statusVariant = 'warning';
+                {/* Plan steps as a vertical list with status dots & tool names */}
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <h4 className="text-xs font-semibold text-[#0F172A]">Plan Steps</h4>
+                    <span className="text-[11px] text-[#64748B] font-mono">
+                      {activeTrace.plan?.length || 0} steps
+                    </span>
+                  </div>
 
-                      return (
-                        <div
-                          key={step.id}
-                          className="p-2.5 rounded-lg bg-surface border border-border/70 space-y-1 text-xs"
-                        >
-                          <div className="flex items-center justify-between">
-                            <div className="flex items-center gap-2">
-                              <span className="font-mono font-bold text-primary bg-primary/10 px-1.5 py-0.5 rounded text-[11px]">
-                                {step.id}
-                              </span>
-                              <span className="font-semibold text-text uppercase text-[11px]">
-                                {step.agent}
+                  {activeTrace.plan && activeTrace.plan.length > 0 ? (
+                    <div className="space-y-2">
+                      {activeTrace.plan.map((step, sIdx) => {
+                        let dotColor = 'bg-[#16A34A]';
+                        if (step.status === 'running') dotColor = 'bg-[#D97706] animate-pulse';
+                        else if (step.status === 'failed') dotColor = 'bg-[#DC2626]';
+                        else if (step.status !== 'done') dotColor = 'bg-[#94A3B8]';
+
+                        return (
+                          <div
+                            key={step.id || sIdx}
+                            className="p-2.5 rounded-lg bg-[#F8FAFC] border border-[#E2E8F0] text-xs space-y-1"
+                          >
+                            <div className="flex items-center justify-between">
+                              <div className="flex items-center gap-1.5">
+                                <span className={`w-2 h-2 rounded-full shrink-0 ${dotColor}`} />
+                                <span className="font-semibold text-[#0F172A] capitalize">
+                                  {step.agent}
+                                </span>
+                              </div>
+                              <span className="text-[10px] uppercase font-semibold text-[#64748B]">
+                                {step.status}
                               </span>
                             </div>
-                            <Badge variant={statusVariant}>{step.status}</Badge>
-                          </div>
 
-                          {step.task && (
-                            <p className="text-[11px] text-muted/90">
-                              {step.task}
-                            </p>
-                          )}
-
-                          <div className="text-[11px] text-muted flex items-center justify-between pt-0.5">
-                            <span>
-                              Tool: <code className="text-teal font-mono">{step.tool || step.agent}</code>
-                            </span>
-                            {step.depends_on && step.depends_on.length > 0 && (
-                              <span className="text-[10px]">
-                                deps: [{step.depends_on.join(', ')}]
-                              </span>
+                            {step.task && (
+                              <p className="text-[11px] text-[#64748B] leading-relaxed">
+                                {step.task}
+                              </p>
                             )}
+
+                            <div className="flex items-center justify-between text-[11px] text-[#64748B] pt-1 border-t border-[#E2E8F0]/60">
+                              <span>
+                                Tool: <code className="text-[#2563EB] font-mono font-medium">{step.tool || step.agent}</code>
+                              </span>
+                              {step.depends_on && step.depends_on.length > 0 && (
+                                <span className="text-[10px]">
+                                  deps: [{step.depends_on.join(', ')}]
+                                </span>
+                              )}
+                            </div>
                           </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                ) : (
-                  <div className="py-4 text-center text-xs text-muted">
-                    No task steps recorded for this query.
-                  </div>
-                )}
-              </div>
-            </>
-          ) : (
-            /* Empty State for "How it worked" Panel */
-            <div className="h-full flex flex-col items-center justify-center text-center p-6 space-y-4">
-              <div className="w-12 h-12 rounded-xl bg-card border border-border flex items-center justify-center text-muted">
-                <Workflow className="w-6 h-6 text-muted/60" />
-              </div>
-              <div>
-                <h4 className="text-xs font-semibold text-text mb-1">No Active Execution Trace</h4>
-                <p className="text-[11px] text-muted leading-relaxed">
-                  Submit a query to inspect the Orchestrator DAG plan, specialist tools invoked by agents, per-role LLM call counts, and execution latency.
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    <div className="py-6 text-center text-xs text-[#64748B]">
+                      No plan steps recorded for this answer.
+                    </div>
+                  )}
+                </div>
+              </>
+            ) : (
+              <div className="py-12 text-center text-xs text-[#64748B] space-y-2">
+                <p className="font-medium text-[#0F172A]">No active trace</p>
+                <p className="text-[11px]">
+                  Submit a query to inspect orchestrator plan steps, tool executions, and LLM call counts.
                 </p>
               </div>
-              <div className="p-3 rounded-lg bg-card border border-border/60 text-left text-[11px] space-y-2 w-full">
-                <div className="font-semibold text-text text-xs">Pipeline Lifecycle:</div>
-                <div className="text-muted space-y-1">
-                  <div>1. Orchestrator plans DAG task dependencies</div>
-                  <div>2. Specialist Agents execute deterministic tools</div>
-                  <div>3. Validator checks numbers & criteria</div>
-                  <div>4. Synthesizer drafts grounded narrative</div>
-                </div>
-              </div>
-            </div>
-          )}
+            )}
+          </div>
+        </aside>
+      ) : (
+        /* Collapsed button to reopen the panel */
+        <div className="flex flex-col items-center">
+          <button
+            type="button"
+            onClick={() => setIsPanelOpen(true)}
+            className="p-2 bg-white border border-[#E2E8F0] rounded-lg text-[#64748B] hover:text-[#0F172A] hover:border-[#2563EB] transition-colors"
+            title="Expand trace panel"
+          >
+            <PanelRightOpen className="w-4 h-4" />
+          </button>
         </div>
-      </div>
+      )}
     </div>
   );
 }

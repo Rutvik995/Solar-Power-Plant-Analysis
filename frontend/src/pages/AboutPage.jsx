@@ -4,33 +4,29 @@ import Badge from '../components/common/Badge';
 import {
   ShieldCheck,
   Cpu,
-  Database,
-  Calculator,
   Workflow,
   Sparkles,
-  Layers,
   FileText,
-  AlertCircle,
 } from 'lucide-react';
 
 export default function AboutPage() {
   return (
     <div className="space-y-6 max-w-5xl mx-auto pb-12">
       {/* Platform Banner */}
-      <div className="bg-surface p-6 rounded-xl border border-border">
+      <div className="bg-white p-6 rounded-lg border border-[#E2E8F0]">
         <div className="flex items-center gap-3 mb-2">
-          <div className="p-2.5 rounded-lg bg-primary/15 text-primary border border-primary/30">
+          <div className="w-10 h-10 rounded-lg bg-[#EFF6FF] border border-[#2563EB]/20 flex items-center justify-center text-[#2563EB] shrink-0">
             <Sparkles className="w-5 h-5" />
           </div>
           <div>
-            <h2 className="text-xl font-bold text-text">Solar Power Plant Multi-Agent System</h2>
-            <p className="text-xs text-muted mt-0.5">
+            <h2 className="text-xl font-bold text-[#0F172A]">Solar Power Plant Multi-Agent System</h2>
+            <p className="text-xs text-[#64748B] mt-0.5">
               LLM-assisted telemetry intelligence platform built on LangGraph, SQLAlchemy, and FastAPI.
             </p>
           </div>
         </div>
 
-        <div className="mt-4 pt-4 border-t border-border/60 flex flex-wrap gap-2 text-xs">
+        <div className="mt-4 pt-4 border-t border-[#E2E8F0] flex flex-wrap gap-2 text-xs">
           <Badge variant="teal">PostgreSQL 14+</Badge>
           <Badge variant="violet">LangGraph StateGraph</Badge>
           <Badge variant="primary">Groq / Llama 3.3</Badge>
@@ -46,10 +42,10 @@ export default function AboutPage() {
           subtitle="Separation between qualitative reasoning and quantitative computation"
           action={<Badge variant="primary">Grounding Verified</Badge>}
         >
-          <blockquote className="p-3 rounded-lg bg-surface border-l-2 border-primary text-xs text-text italic leading-relaxed">
+          <blockquote className="p-3.5 rounded-r-lg bg-[#F8FAFC] border-l-2 border-[#2563EB] text-xs text-[#0F172A] italic leading-relaxed">
             "The LLM plans, coordinates, and explains; database and analytical tools compute. Numbers come directly from database tools, and an automated grounding check flags mismatches."
           </blockquote>
-          <p className="text-xs text-muted mt-3 leading-relaxed">
+          <p className="text-xs text-[#64748B] mt-3 leading-relaxed">
             All solar formulas (PR, capacity factor, specific yield, robust peer deviation) are computed directly by database tools and metrics algorithms, and a post-synthesis grounding check flags mismatches before final output.
           </p>
         </Card>
@@ -59,18 +55,18 @@ export default function AboutPage() {
           subtitle="Multi-layer protection against malicious execution or accidental data loss"
           action={<Badge variant="success">Read-Only Guarded</Badge>}
         >
-          <ul className="space-y-2 text-xs text-muted">
+          <ul className="space-y-2.5 text-xs text-[#64748B]">
             <li className="flex items-start gap-2">
-              <span className="font-mono text-primary font-bold">L1:</span>
-              <span><strong>SQLGlot AST Parse:</strong> Rejects any query that is not a strictly validated SELECT or WITH-SELECT.</span>
+              <span className="font-mono text-[#2563EB] font-bold">L1:</span>
+              <span><strong className="text-[#0F172A]">SQLGlot AST Parse:</strong> Rejects any query that is not a strictly validated SELECT or WITH-SELECT.</span>
             </li>
             <li className="flex items-start gap-2">
-              <span className="font-mono text-teal font-bold">L2:</span>
-              <span><strong>Table Allowlist:</strong> Rejects queries referencing tables outside the 4 approved solar telemetry entities.</span>
+              <span className="font-mono text-[#0D9488] font-bold">L2:</span>
+              <span><strong className="text-[#0F172A]">Table Allowlist:</strong> Rejects queries referencing tables outside the 4 approved solar telemetry entities.</span>
             </li>
             <li className="flex items-start gap-2">
-              <span className="font-mono text-violet font-bold">L3:</span>
-              <span><strong>SQLAlchemy Engine Guard:</strong> Intercepts connection events to enforce read-only execution at driver level.</span>
+              <span className="font-mono text-[#7C3AED] font-bold">L3:</span>
+              <span><strong className="text-[#0F172A]">SQLAlchemy Engine Guard:</strong> Intercepts connection events to enforce read-only execution at driver level.</span>
             </li>
           </ul>
         </Card>
@@ -83,42 +79,42 @@ export default function AboutPage() {
         action={<Badge variant="violet">LangGraph StateGraph</Badge>}
       >
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-xs">
-          <div className="p-3.5 rounded-lg bg-surface border border-border space-y-1.5">
-            <div className="font-bold text-text flex items-center gap-1.5">
-              <Workflow className="w-3.5 h-3.5 text-primary" />
+          <div className="p-3.5 rounded-lg bg-[#F8FAFC] border border-[#E2E8F0] space-y-1.5">
+            <div className="font-bold text-[#0F172A] flex items-center gap-1.5">
+              <Workflow className="w-3.5 h-3.5 text-[#2563EB]" />
               Orchestrator
             </div>
-            <p className="text-muted leading-relaxed">
+            <p className="text-[#64748B] leading-relaxed">
               Planner LLM analyzes user intent, scope, and entities to emit a valid DAG Plan with topological dependencies.
             </p>
           </div>
 
-          <div className="p-3.5 rounded-lg bg-surface border border-border space-y-1.5">
-            <div className="font-bold text-text flex items-center gap-1.5">
-              <Cpu className="w-3.5 h-3.5 text-teal" />
+          <div className="p-3.5 rounded-lg bg-[#F8FAFC] border border-[#E2E8F0] space-y-1.5">
+            <div className="font-bold text-[#0F172A] flex items-center gap-1.5">
+              <Cpu className="w-3.5 h-3.5 text-[#0D9488]" />
               Specialist Agents
             </div>
-            <p className="text-muted leading-relaxed">
+            <p className="text-[#64748B] leading-relaxed">
               Data Agent (pure SQL), Performance Agent, Fault Agent, and Environmental Agent execute parallel task layers.
             </p>
           </div>
 
-          <div className="p-3.5 rounded-lg bg-surface border border-border space-y-1.5">
-            <div className="font-bold text-text flex items-center gap-1.5">
-              <ShieldCheck className="w-3.5 h-3.5 text-sky" />
+          <div className="p-3.5 rounded-lg bg-[#F8FAFC] border border-[#E2E8F0] space-y-1.5">
+            <div className="font-bold text-[#0F172A] flex items-center gap-1.5">
+              <ShieldCheck className="w-3.5 h-3.5 text-[#0284C7]" />
               Validator Node
             </div>
-            <p className="text-muted leading-relaxed">
+            <p className="text-[#64748B] leading-relaxed">
               Verifies task status, dependency outputs, and success criteria. Triggers replanning if criteria are not fulfilled.
             </p>
           </div>
 
-          <div className="p-3.5 rounded-lg bg-surface border border-border space-y-1.5">
-            <div className="font-bold text-text flex items-center gap-1.5">
-              <FileText className="w-3.5 h-3.5 text-violet" />
+          <div className="p-3.5 rounded-lg bg-[#F8FAFC] border border-[#E2E8F0] space-y-1.5">
+            <div className="font-bold text-[#0F172A] flex items-center gap-1.5">
+              <FileText className="w-3.5 h-3.5 text-[#7C3AED]" />
               Synthesizer Node
             </div>
-            <p className="text-muted leading-relaxed">
+            <p className="text-[#64748B] leading-relaxed">
               Drafts grounded final response and performs regex numerical audit against all stored tool metrics before output.
             </p>
           </div>
@@ -132,42 +128,42 @@ export default function AboutPage() {
         action={<Badge variant="primary">Semantic Layer</Badge>}
       >
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
-          <div className="p-3 rounded-lg bg-surface border border-border/80 space-y-1">
-            <div className="font-semibold text-text">Performance Ratio (PR) — BR-01, BR-04</div>
-            <div className="font-mono text-primary bg-card px-2 py-1 rounded text-[11px]">
+          <div className="p-3.5 rounded-lg bg-[#F8FAFC] border border-[#E2E8F0] space-y-2">
+            <div className="font-semibold text-[#0F172A]">Performance Ratio (PR) — BR-01, BR-04</div>
+            <div className="font-mono text-[#2563EB] bg-white border border-[#E2E8F0] px-2.5 py-1.5 rounded text-[11px] font-semibold">
               PR = Total Yield (kWh) / (Rated DC Capacity × Insolation H)
             </div>
-            <p className="text-muted text-[11px] mt-1">
+            <p className="text-[#64748B] text-[11px] leading-relaxed">
               Guarded by minimum insolation threshold (H &gt; 0.5 kWh/m²). When aggregated across blocks or plants, yields and expected yields are summed separately rather than averaging individual PRs.
             </p>
           </div>
 
-          <div className="p-3 rounded-lg bg-surface border border-border/80 space-y-1">
-            <div className="font-semibold text-text">Peer Deviation Score — Robust MAD Z-Score</div>
-            <div className="font-mono text-teal bg-card px-2 py-1 rounded text-[11px]">
+          <div className="p-3.5 rounded-lg bg-[#F8FAFC] border border-[#E2E8F0] space-y-2">
+            <div className="font-semibold text-[#0F172A]">Peer Deviation Score — Robust MAD Z-Score</div>
+            <div className="font-mono text-[#0D9488] bg-white border border-[#E2E8F0] px-2.5 py-1.5 rounded text-[11px] font-semibold">
               Z = (PR_inverter - median(PR_peers)) / (1.4826 × MAD(PR_peers))
             </div>
-            <p className="text-muted text-[11px] mt-1">
+            <p className="text-[#64748B] text-[11px] leading-relaxed">
               Groups inverters by identical day and block. Flags persistent underperformance when Z &lt; -2.0 for consecutive days.
             </p>
           </div>
 
-          <div className="p-3 rounded-lg bg-surface border border-border/80 space-y-1">
-            <div className="font-semibold text-text">Soiling Loss Percentage — BR-07</div>
-            <div className="font-mono text-sky bg-card px-2 py-1 rounded text-[11px]">
+          <div className="p-3.5 rounded-lg bg-[#F8FAFC] border border-[#E2E8F0] space-y-2">
+            <div className="font-semibold text-[#0F172A]">Soiling Loss Percentage — BR-07</div>
+            <div className="font-mono text-[#0284C7] bg-white border border-[#E2E8F0] px-2.5 py-1.5 rounded text-[11px] font-semibold">
               Loss % = (1 - Soiling Ratio) × 100
             </div>
-            <p className="text-muted text-[11px] mt-1">
+            <p className="text-[#64748B] text-[11px] leading-relaxed">
               Ratio of 1.0 represents clean modules. Cleaning events are detected automatically when soiling ratio jumps by &gt; 5%.
             </p>
           </div>
 
-          <div className="p-3 rounded-lg bg-surface border border-border/80 space-y-1">
-            <div className="font-semibold text-text">Zero Generation Anomaly</div>
-            <div className="font-mono text-violet bg-card px-2 py-1 rounded text-[11px]">
+          <div className="p-3.5 rounded-lg bg-[#F8FAFC] border border-[#E2E8F0] space-y-2">
+            <div className="font-semibold text-[#0F172A]">Zero Generation Anomaly</div>
+            <div className="font-mono text-[#7C3AED] bg-white border border-[#E2E8F0] px-2.5 py-1.5 rounded text-[11px] font-semibold">
               Yield &le; 1.0 kWh AND Insolation H &gt; 0.5 kWh/m²
             </div>
-            <p className="text-muted text-[11px] mt-1">
+            <p className="text-[#64748B] text-[11px] leading-relaxed">
               Identifies complete inverter trip under sunny conditions. Skips standby status codes (e.g. Code 1).
             </p>
           </div>

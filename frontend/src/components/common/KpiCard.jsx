@@ -5,7 +5,7 @@ import { ArrowUpRight, ArrowDownRight, Minus } from 'lucide-react';
 import { ResponsiveContainer, LineChart, Line } from 'recharts';
 
 /**
- * Reusable KpiCard component with metric display, delta indicator, and optional sparkline.
+ * Reusable KpiCard component with clean light theme styling.
  */
 export default function KpiCard({
   title,
@@ -13,7 +13,7 @@ export default function KpiCard({
   unit = '',
   previousValue,
   delta,
-  deltaIsGood = true, // true if increase is positive (like yield/PR), false if increase is bad (like soiling/faults)
+  deltaIsGood = true,
   icon: Icon,
   sparklineData = [],
   loading = false,
@@ -21,13 +21,13 @@ export default function KpiCard({
 }) {
   if (loading) {
     return (
-      <div className={`bg-card border border-border rounded-xl p-5 ${className}`}>
+      <div className={`bg-white border border-[#E2E8F0] rounded-lg p-5 ${className}`}>
         <div className="flex justify-between items-center mb-3">
-          <Skeleton className="w-24 h-4" />
-          <Skeleton className="w-8 h-8 rounded-lg" />
+          <Skeleton className="w-24 h-4 bg-[#E2E8F0]" />
+          <Skeleton className="w-8 h-8 rounded-lg bg-[#E2E8F0]" />
         </div>
-        <Skeleton className="w-32 h-8 mb-2" />
-        <Skeleton className="w-20 h-4" />
+        <Skeleton className="w-32 h-8 mb-2 bg-[#E2E8F0]" />
+        <Skeleton className="w-20 h-4 bg-[#E2E8F0]" />
       </div>
     );
   }
@@ -59,24 +59,24 @@ export default function KpiCard({
   }
 
   return (
-    <div className={`bg-card border border-border rounded-xl p-5 shadow-sm hover:border-border/90 transition-all ${className}`}>
+    <div className={`bg-white border border-[#E2E8F0] rounded-lg p-5 shadow-none transition-colors ${className}`}>
       <div className="flex items-center justify-between mb-2">
-        <span className="text-xs font-medium text-muted uppercase tracking-wider">{title}</span>
+        <span className="text-xs font-medium text-[#64748B] uppercase tracking-wider">{title}</span>
         {Icon && (
-          <div className="p-2 rounded-lg bg-surface border border-border/60 text-primary">
+          <div className="p-2 rounded-lg bg-[#EFF6FF] border border-[#2563EB]/20 text-[#2563EB]">
             <Icon className="w-4 h-4" />
           </div>
         )}
       </div>
 
       <div className="flex items-baseline gap-2 mb-3">
-        <span className="text-2xl font-bold tracking-tight text-text">
+        <span className="text-2xl font-bold tracking-tight text-[#0F172A]">
           {value !== null && value !== undefined ? value : '—'}
         </span>
-        {unit && <span className="text-xs text-muted font-normal">{unit}</span>}
+        {unit && <span className="text-xs text-[#64748B] font-normal">{unit}</span>}
       </div>
 
-      <div className="flex items-center justify-between pt-2 border-t border-border/40 text-xs">
+      <div className="flex items-center justify-between pt-2 border-t border-[#E2E8F0] text-xs">
         {hasDelta ? (
           <div className="flex items-center gap-1.5">
             <Badge variant={deltaVariant}>
@@ -85,10 +85,10 @@ export default function KpiCard({
               {isNeutral && <Minus className="w-3 h-3" />}
               {Math.abs(computedDelta).toFixed(1)}%
             </Badge>
-            <span className="text-muted">vs prev</span>
+            <span className="text-[#64748B]">vs prev</span>
           </div>
         ) : (
-          <span className="text-muted text-[11px]">No previous period</span>
+          <span className="text-[#64748B] text-[11px]">No previous period</span>
         )}
 
         {sparklineData && sparklineData.length > 1 && (
@@ -98,7 +98,7 @@ export default function KpiCard({
                 <Line
                   type="monotone"
                   dataKey="value"
-                  stroke="#F5B301"
+                  stroke="#2563EB"
                   strokeWidth={1.5}
                   dot={false}
                   isAnimationActive={false}
