@@ -1,19 +1,39 @@
 import React from 'react';
 import { useLocation } from 'react-router-dom';
-import { Plus } from 'lucide-react';
+import { Plus, PanelLeftClose, PanelLeftOpen } from 'lucide-react';
 
 const TITLES = {
-  '/': 'Ask the System',
+  '/': 'Chat',
   '/about': 'About Platform',
 };
 
-export default function TopBar({ mode, setMode, onNewChat }) {
+export default function TopBar({
+  mode,
+  setMode,
+  onNewChat,
+  isSidebarOpen = true,
+  onToggleSidebar,
+}) {
   const location = useLocation();
   const pageTitle = TITLES[location.pathname] || 'Solar Intelligence';
 
   return (
     <header className="h-14 bg-white border-b border-[#E2E8F0] px-6 flex items-center justify-between sticky top-0 z-20">
-      <div>
+      <div className="flex items-center gap-2.5">
+        {onToggleSidebar && (
+          <button
+            type="button"
+            onClick={onToggleSidebar}
+            className="p-1.5 rounded-lg border border-[#E2E8F0] hover:bg-[#F8FAFC] text-[#64748B] hover:text-[#0F172A] transition-colors"
+            title={isSidebarOpen ? 'Collapse sidebar' : 'Expand sidebar'}
+          >
+            {isSidebarOpen ? (
+              <PanelLeftClose className="w-4 h-4" />
+            ) : (
+              <PanelLeftOpen className="w-4 h-4" />
+            )}
+          </button>
+        )}
         <h2 className="text-sm font-semibold text-[#0F172A]">{pageTitle}</h2>
       </div>
 
