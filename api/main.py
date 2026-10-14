@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import threading
 import time
 import uuid
 from datetime import date, datetime, timedelta
@@ -21,7 +22,7 @@ from typing import Any, Optional
 
 import numpy as np
 import pandas as pd
-from fastapi import FastAPI, Query, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from langgraph.checkpoint.memory import MemorySaver
@@ -29,9 +30,37 @@ from pydantic import BaseModel
 
 from solar_agent.config.settings import settings
 from solar_agent.db import queries as q
+from solar_agent.db.chat_storage import (
+    create_message,
+    create_session,
+    delete_message_pair,
+    delete_messages_after,
+    delete_session,
+    get_last_completed_assistant_context,
+    get_message,
+    get_message_by_run_id,
+    get_session,
+    init_chat_db,
+    list_messages,
+    list_sessions,
+    update_message,
+    update_session,
+)
 from solar_agent.graph.data_store import DataStore
 from solar_agent.graph.graph import build_graph, initial_state
-from solar_agent.state import BudgetExceeded
+from solar_agent.graph.synthesizer import (
+    clean_task_summary,
+    extract_structured_answers,
+    normalize_spaces,
+)
+from solar_agent.state import (
+    BudgetExceeded,
+    Cancelled,
+    CancelToken,
+    get_cancel_token,
+    register_cancel_token,
+    unregister_cancel_token,
+)
 from solar_agent.tools import metrics as m
 from solar_agent.tools.fault_tools import _EXCLUDE_YIELD_CODES, _FAULT_CODES
 
@@ -46,6 +75,8 @@ def clean_for_json(obj: Any) -> Any:
     """Recursively clean data structures so NaNs become None and dates become ISO."""
     if obj is None:
         return None
+    if isinstance(obj, bool):
+        return obj
     if isinstance(obj, (float, np.floating)):
         if math.isnan(obj) or math.isinf(obj):
             return None
@@ -106,6 +137,16 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.on_event("startup")
+def on_startup():
+    """Apply chat_schema.sql and mark stale running messages as stopped."""
+    try:
+        init_chat_db()
+    except Exception as exc:
+        logger.error("Failed to initialize chat database on startup: %s", exc)
+
 
 
 # ---------------------------------------------------------------------------
@@ -499,139 +540,107 @@ def get_dashboard_flagged(
 # Multi-Agent Chat Endpoint
 # ---------------------------------------------------------------------------
 
-class ChatRequest(BaseModel):
-    query: str
-    thread_id: Optional[str] = None
-    mode: Optional[str] = "replay"
+# ---------------------------------------------------------------------------
+# Structured Payload Helpers
+# ---------------------------------------------------------------------------
+
+def _format_plan_steps(plan_obj: Any, results_dict: dict[str, Any]) -> list[dict[str, Any]]:
+    agent_default_tools = {
+        "data": "fetch_inverter_daily",
+        "performance": "compute_kpis_tool",
+        "fault": "detect_status_faults_tool",
+        "environment": "estimate_soiling_loss_tool",
+    }
+    plan_data = []
+    if plan_obj and hasattr(plan_obj, "tasks"):
+        for t in plan_obj.tasks:
+            tr = results_dict.get(t.id) if results_dict else None
+            st_val = tr.status.value if tr and hasattr(tr, "status") and hasattr(tr.status, "value") else "pending"
+
+            real_tool = None
+            if tr and getattr(tr, "tool_calls_made", None) and tr.tool_calls_made:
+                real_tool = tr.tool_calls_made[0]
+            if not real_tool:
+                hint = getattr(t, "tool_hint", None) or getattr(t, "tool", None)
+                if hint and hint != "auto":
+                    real_tool = hint
+            if not real_tool or real_tool == "auto":
+                real_tool = agent_default_tools.get(t.agent, "fetch_inverter_daily")
+
+            summary_clean = clean_task_summary(tr.summary) if (tr and tr.summary) else f"{t.agent.capitalize()} analysis completed."
+            plan_data.append({
+                "id": t.id,
+                "task": summary_clean,
+                "agent": t.agent,
+                "tool": real_tool,
+                "depends_on": t.depends_on,
+                "status": st_val,
+            })
+    return plan_data
 
 
-@app.post("/api/chat")
-def chat_endpoint(request: ChatRequest, req: Request):
-    """
-    Runs the multi-agent graph and returns structured fields:
-    short_answer, details_markdown, tables, assumptions, warnings, period, sources, plan, llm_calls, elapsed_ms, error.
-    """
-    from solar_agent.graph.synthesizer import clean_task_summary, normalize_spaces, extract_structured_answers
+def format_structured_payload(
+    result: dict[str, Any],
+    elapsed_ms: float,
+    exc: Optional[Exception] = None,
+) -> dict[str, Any]:
+    """Build unified structured payload dictionary according to the specifications."""
+    results_dict = dict(result.get("results") or {})
+    if exc and hasattr(exc, "partial_results") and exc.partial_results:
+        results_dict.update(exc.partial_results)
 
-    start_time = time.perf_counter()
-    thread_id = request.thread_id or str(uuid.uuid4())
-    mode = request.mode or "replay"
-
-    # Allow test injection of mocked LLM via app.state
-    llm_override = getattr(req.app.state, "llm_override", None)
-
-    try:
-        checkpointer = get_memory_saver(thread_id)
-        graph = build_graph(llm=llm_override, mode=mode, checkpointer=checkpointer)
-        config = {"configurable": {"thread_id": thread_id}}
-        state_input = initial_state(request.query.strip())
-        state_input["run_id"] = str(uuid.uuid4())
-        result = graph.invoke(state_input, config=config)
-    except BudgetExceeded as exc:
-        elapsed_ms = round((time.perf_counter() - start_time) * 1000, 1)
-        return CleanJSONResponse(
-            status_code=429,
-            content={
-                "short_answer": f"LLM call budget exceeded: {exc}",
-                "details_markdown": "",
-                "answer_markdown": f"LLM call budget exceeded: {exc}",
-                "tables": [],
-                "charts": [],
-                "plan": [],
-                "assumptions": [],
-                "warnings": [str(exc)],
-                "period": None,
-                "sources": [],
-                "llm_calls": {
-                    "planner": 0,
-                    "agent": 0,
-                    "synthesizer": 0,
-                    "total": settings.max_llm_calls_per_query,
-                    "budget": settings.max_llm_calls_per_query,
-                },
-                "elapsed_ms": elapsed_ms,
-                "error": {
-                    "code": 429,
-                    "type": "BudgetExceeded",
-                    "message": str(exc),
-                },
-            },
-        )
-    except Exception as exc:
-        elapsed_ms = round((time.perf_counter() - start_time) * 1000, 1)
-        if is_rate_limit_error(exc):
-            return CleanJSONResponse(
-                status_code=429,
-                content={
-                    "short_answer": "Rate limit exceeded (HTTP 429). Please wait a moment and retry.",
-                    "details_markdown": "",
-                    "answer_markdown": "Rate limit exceeded (HTTP 429). Please wait a moment and retry.",
-                    "tables": [],
-                    "charts": [],
-                    "plan": [],
-                    "assumptions": [],
-                    "warnings": [str(exc)],
-                    "period": None,
-                    "sources": [],
-                    "llm_calls": {
-                        "planner": 0,
-                        "agent": 0,
-                        "synthesizer": 0,
-                        "total": 0,
-                        "budget": settings.max_llm_calls_per_query,
-                    },
-                    "elapsed_ms": elapsed_ms,
-                    "error": {
-                        "code": 429,
-                        "type": "RateLimitError",
-                        "message": "Rate limit exceeded (HTTP 429). Please wait and try again.",
-                    },
-                },
-            )
-        return CleanJSONResponse(
-            status_code=400,
-            content={
-                "short_answer": f"Execution error: {exc}",
-                "details_markdown": "",
-                "answer_markdown": f"Execution error: {exc}",
-                "tables": [],
-                "charts": [],
-                "plan": [],
-                "assumptions": [],
-                "warnings": [str(exc)],
-                "period": None,
-                "sources": [],
-                "llm_calls": {
-                    "planner": 0,
-                    "agent": 0,
-                    "synthesizer": 0,
-                    "total": 0,
-                    "budget": settings.max_llm_calls_per_query,
-                },
-                "elapsed_ms": elapsed_ms,
-                "error": {
-                    "code": 400,
-                    "type": type(exc).__name__,
-                    "message": str(exc),
-                },
-            },
-        )
-
-    elapsed_ms = round((time.perf_counter() - start_time) * 1000, 1)
-    results_dict = result.get("results") or {}
-
-    ans = normalize_spaces(result.get("final_answer") or "")
-    short_answer = result.get("short_answer")
-    details_markdown = result.get("details_markdown")
-    if not short_answer or not details_markdown:
-        short_answer, details_markdown = extract_structured_answers(ans)
-    short_answer = normalize_spaces(short_answer)
-    details_markdown = normalize_spaces(details_markdown)
+    # 1. Error & Text outputs
+    err_obj = None
+    if isinstance(exc, Cancelled):
+        ans = "Execution stopped by user."
+        short_answer = "Execution stopped by user."
+        details_markdown = "Execution was stopped before completion."
+        err_obj = {
+            "code": 499,
+            "type": "Cancelled",
+            "message": str(exc) or "Execution stopped by user.",
+        }
+    elif isinstance(exc, BudgetExceeded):
+        ans = f"LLM call budget exceeded: {exc}"
+        short_answer = f"LLM call budget exceeded: {exc}"
+        details_markdown = ""
+        err_obj = {
+            "code": 429,
+            "type": "BudgetExceeded",
+            "message": str(exc),
+        }
+    elif exc is not None:
+        ans = f"Execution error: {exc}"
+        short_answer = f"Execution error: {exc}"
+        details_markdown = ""
+        err_obj = {
+            "code": 400,
+            "type": type(exc).__name__,
+            "message": str(exc),
+        }
+    else:
+        ans = normalize_spaces(result.get("final_answer") or "")
+        short_answer = result.get("short_answer")
+        details_markdown = result.get("details_markdown")
+        if not short_answer or not details_markdown:
+            short_answer, details_markdown = extract_structured_answers(ans)
+        short_answer = normalize_spaces(short_answer)
+        details_markdown = normalize_spaces(details_markdown)
+        if "⚠ LLM call budget exceeded" in ans:
+            err_obj = {
+                "code": 429,
+                "type": "BudgetExceeded",
+                "message": "LLM call budget exceeded during pipeline execution.",
+            }
 
     assumptions = list(result.get("assumptions") or [])
     warnings = list(result.get("warnings") or [])
+    if isinstance(exc, Cancelled) and "Execution stopped by user." not in warnings:
+        warnings.append("Execution stopped by user.")
+    elif isinstance(exc, BudgetExceeded) and str(exc) not in warnings:
+        warnings.append(str(exc))
 
-    # 1. Tables: [{title, columns, rows}]
+    # 2. Tables: [{title, columns, rows}]
     tables = []
     for tid, tr in results_dict.items():
         if tr and tr.data_ref:
@@ -703,7 +712,7 @@ def chat_endpoint(request: ChatRequest, req: Request):
                         "rows": rows,
                     })
 
-    # 2. Charts: [plotly_json]
+    # 3. Charts: [plotly_json]
     charts = []
     for tid, tr in results_dict.items():
         if tr and tr.metrics and "chart_json" in tr.metrics:
@@ -716,43 +725,12 @@ def chat_endpoint(request: ChatRequest, req: Request):
             else:
                 charts.append(cj)
 
-    # 3. Plan: [{id, agent, tool, depends_on, status}]
-    # Plan steps carry real agent and tool names (no "auto") and a status.
-    agent_default_tools = {
-        "data": "fetch_inverter_daily",
-        "performance": "compute_kpis_tool",
-        "fault": "detect_status_faults_tool",
-        "environment": "estimate_soiling_loss_tool",
-    }
-    plan_data = []
-    plan_obj = result.get("plan")
-    if plan_obj and hasattr(plan_obj, "tasks"):
-        for t in plan_obj.tasks:
-            tr = results_dict.get(t.id)
-            st_val = tr.status.value if tr and hasattr(tr, "status") and hasattr(tr.status, "value") else "pending"
+    # 4. Plan: [{id, task, agent, tool, depends_on, status}]
+    plan_data = _format_plan_steps(result.get("plan"), results_dict)
 
-            real_tool = None
-            if tr and getattr(tr, "tool_calls_made", None) and tr.tool_calls_made:
-                real_tool = tr.tool_calls_made[0]
-            if not real_tool:
-                hint = getattr(t, "tool_hint", None) or getattr(t, "tool", None)
-                if hint and hint != "auto":
-                    real_tool = hint
-            if not real_tool or real_tool == "auto":
-                real_tool = agent_default_tools.get(t.agent, "fetch_inverter_daily")
-
-            summary_clean = clean_task_summary(tr.summary) if (tr and tr.summary) else f"{t.agent.capitalize()} analysis completed."
-            plan_data.append({
-                "id": t.id,
-                "task": summary_clean,
-                "agent": t.agent,
-                "tool": real_tool,
-                "depends_on": t.depends_on,
-                "status": st_val,
-            })
-
-    # 4. Period: {start, end}
+    # 5. Period: {start, end}
     period = None
+    plan_obj = result.get("plan")
     if plan_obj and hasattr(plan_obj, "scope") and plan_obj.scope:
         s = plan_obj.scope
         period = {
@@ -760,7 +738,7 @@ def chat_endpoint(request: ChatRequest, req: Request):
             "end": s.end_date.isoformat(),
         }
 
-    # 5. Sources: tool names
+    # 6. Sources: tool names
     sources = []
     for tr in results_dict.values():
         if tr and getattr(tr, "tool_calls_made", None):
@@ -770,7 +748,7 @@ def chat_endpoint(request: ChatRequest, req: Request):
     if not sources:
         sources = ["fetch_inverter_daily", "compute_kpis_tool"]
 
-    # 6. LLM calls: computed per request
+    # 7. LLM calls: computed per request
     llm_calls = result.get("llm_calls")
     if not llm_calls:
         total_calls = result.get("llm_call_count", 0)
@@ -785,15 +763,6 @@ def chat_endpoint(request: ChatRequest, req: Request):
             "synthesizer": synth_calls,
             "total": total_calls,
             "budget": budget,
-        }
-
-    # Check for budget warning in final answer
-    err_obj = None
-    if "⚠ LLM call budget exceeded" in ans:
-        err_obj = {
-            "code": 429,
-            "type": "BudgetExceeded",
-            "message": "LLM call budget exceeded during pipeline execution.",
         }
 
     return {
@@ -811,3 +780,491 @@ def chat_endpoint(request: ChatRequest, req: Request):
         "elapsed_ms": elapsed_ms,
         "error": err_obj,
     }
+
+
+# ---------------------------------------------------------------------------
+# Background Run Tracking & Execution
+# ---------------------------------------------------------------------------
+
+_RUN_STATES: dict[str, dict[str, Any]] = {}
+_RUN_THREADS: dict[str, threading.Thread] = {}
+_RUNS_LOCK = threading.Lock()
+
+
+def _execute_graph_run(
+    run_id: str,
+    asst_msg_id: str,
+    session_id: str,
+    query: str,
+    mode: str,
+    prev_query: Optional[str],
+    prev_tasks: Optional[list[dict]],
+    prev_scope: Optional[dict],
+    llm_override: Any = None,
+) -> None:
+    t_start = time.perf_counter()
+    cancel_token = get_cancel_token(run_id)
+
+    state_input = initial_state(query)
+    state_input["run_id"] = run_id
+    if prev_query:
+        state_input["previous_query"] = prev_query
+    if prev_tasks:
+        state_input["previous_tasks"] = prev_tasks
+    if prev_scope:
+        state_input["previous_scope"] = prev_scope
+
+    graph = build_graph(llm=llm_override, mode=mode)
+    config = {"configurable": {"thread_id": f"session_{session_id}"}}
+    final_state = dict(state_input)
+
+    try:
+        if cancel_token:
+            cancel_token.check()
+
+        for chunk in graph.stream(state_input, config=config, stream_mode="updates"):
+            if cancel_token:
+                cancel_token.check(partial_results=final_state.get("results") or {})
+
+            for _, patch in chunk.items():
+                if isinstance(patch, dict):
+                    final_state.update(patch)
+
+            with _RUNS_LOCK:
+                if run_id in _RUN_STATES:
+                    _RUN_STATES[run_id]["elapsed_ms"] = round((time.perf_counter() - t_start) * 1000, 1)
+                    if "llm_calls" in final_state:
+                        _RUN_STATES[run_id]["llm_calls"] = final_state["llm_calls"]
+                    if final_state.get("plan"):
+                        _RUN_STATES[run_id]["plan"] = _format_plan_steps(
+                            final_state["plan"], final_state.get("results") or {}
+                        )
+
+        elapsed_ms = round((time.perf_counter() - t_start) * 1000, 1)
+        payload = format_structured_payload(final_state, elapsed_ms)
+        payload["run_id"] = run_id
+
+        with _RUNS_LOCK:
+            if run_id in _RUN_STATES:
+                _RUN_STATES[run_id]["status"] = "complete"
+                _RUN_STATES[run_id]["payload"] = payload
+                _RUN_STATES[run_id]["plan"] = payload.get("plan", [])
+                _RUN_STATES[run_id]["llm_calls"] = payload.get("llm_calls", {})
+                _RUN_STATES[run_id]["elapsed_ms"] = elapsed_ms
+
+        update_message(
+            message_id=asst_msg_id,
+            content=payload.get("short_answer") or "",
+            payload=payload,
+            status="complete",
+        )
+
+    except Cancelled as exc:
+        elapsed_ms = round((time.perf_counter() - t_start) * 1000, 1)
+        partial_res = getattr(exc, "partial_results", None) or final_state.get("results") or {}
+        final_state["results"] = partial_res
+        payload = format_structured_payload(final_state, elapsed_ms, exc=exc)
+        payload["run_id"] = run_id
+
+        with _RUNS_LOCK:
+            if run_id in _RUN_STATES:
+                _RUN_STATES[run_id]["status"] = "stopped"
+                _RUN_STATES[run_id]["payload"] = payload
+                _RUN_STATES[run_id]["plan"] = payload.get("plan", [])
+                _RUN_STATES[run_id]["elapsed_ms"] = elapsed_ms
+
+        update_message(
+            message_id=asst_msg_id,
+            content="Execution stopped by user.",
+            payload=payload,
+            status="stopped",
+        )
+
+    except BudgetExceeded as exc:
+        elapsed_ms = round((time.perf_counter() - t_start) * 1000, 1)
+        payload = format_structured_payload(final_state, elapsed_ms, exc=exc)
+        payload["run_id"] = run_id
+
+        with _RUNS_LOCK:
+            if run_id in _RUN_STATES:
+                _RUN_STATES[run_id]["status"] = "complete"
+                _RUN_STATES[run_id]["payload"] = payload
+                _RUN_STATES[run_id]["elapsed_ms"] = elapsed_ms
+
+        update_message(
+            message_id=asst_msg_id,
+            content=payload.get("short_answer") or str(exc),
+            payload=payload,
+            status="complete",
+        )
+
+    except Exception as exc:
+        logger.exception("Background graph execution failed: %s", exc)
+        elapsed_ms = round((time.perf_counter() - t_start) * 1000, 1)
+        payload = format_structured_payload(final_state, elapsed_ms, exc=exc)
+        payload["run_id"] = run_id
+
+        with _RUNS_LOCK:
+            if run_id in _RUN_STATES:
+                _RUN_STATES[run_id]["status"] = "error"
+                _RUN_STATES[run_id]["payload"] = payload
+                _RUN_STATES[run_id]["error"] = str(exc)
+                _RUN_STATES[run_id]["elapsed_ms"] = elapsed_ms
+
+        update_message(
+            message_id=asst_msg_id,
+            content=f"Execution error: {exc}",
+            payload=payload,
+            status="error",
+        )
+    finally:
+        unregister_cancel_token(run_id)
+
+
+# ---------------------------------------------------------------------------
+# Multi-Agent Synchronous Chat Endpoint (Legacy / Direct)
+# ---------------------------------------------------------------------------
+
+class ChatRequest(BaseModel):
+    query: str
+    thread_id: Optional[str] = None
+    mode: Optional[str] = "replay"
+
+
+@app.post("/api/chat")
+def chat_endpoint(request: ChatRequest, req: Request):
+    """
+    Runs the multi-agent graph synchronously and returns structured fields.
+    """
+    start_time = time.perf_counter()
+    thread_id = request.thread_id or str(uuid.uuid4())
+    mode = request.mode or "replay"
+    llm_override = getattr(req.app.state, "llm_override", None)
+
+    try:
+        checkpointer = get_memory_saver(thread_id)
+        graph = build_graph(llm=llm_override, mode=mode, checkpointer=checkpointer)
+        config = {"configurable": {"thread_id": thread_id}}
+        state_input = initial_state(request.query.strip())
+        state_input["run_id"] = str(uuid.uuid4())
+        result = graph.invoke(state_input, config=config)
+        elapsed_ms = round((time.perf_counter() - start_time) * 1000, 1)
+        payload = format_structured_payload(result, elapsed_ms)
+        return payload
+    except BudgetExceeded as exc:
+        elapsed_ms = round((time.perf_counter() - start_time) * 1000, 1)
+        payload = format_structured_payload({}, elapsed_ms, exc=exc)
+        return CleanJSONResponse(status_code=429, content=payload)
+    except Exception as exc:
+        elapsed_ms = round((time.perf_counter() - start_time) * 1000, 1)
+        if is_rate_limit_error(exc):
+            payload = format_structured_payload({}, elapsed_ms, exc=exc)
+            payload["error"] = {"code": 429, "type": "RateLimitError", "message": "Rate limit exceeded (HTTP 429). Please wait and try again."}
+            return CleanJSONResponse(status_code=429, content=payload)
+        payload = format_structured_payload({}, elapsed_ms, exc=exc)
+        return CleanJSONResponse(status_code=400, content=payload)
+
+
+# ---------------------------------------------------------------------------
+# Sessions & Async Chat Endpoints
+# ---------------------------------------------------------------------------
+
+class CreateSessionRequest(BaseModel):
+    title: Optional[str] = "New Chat"
+
+
+class UpdateSessionRequest(BaseModel):
+    title: str
+
+
+class SessionChatRequest(BaseModel):
+    query: str
+    mode: Optional[str] = "replay"
+
+
+class EditMessageRequest(BaseModel):
+    query: str
+    mode: Optional[str] = "replay"
+
+
+@app.get("/api/sessions")
+def get_sessions():
+    """List all chat sessions ordered by updated_at descending."""
+    return list_sessions()
+
+
+@app.post("/api/sessions")
+def create_session_endpoint(body: Optional[CreateSessionRequest] = None):
+    """Create a new chat session."""
+    title = body.title if (body and body.title) else "New Chat"
+    return create_session(title=title)
+
+
+@app.patch("/api/sessions/{session_id}")
+def update_session_endpoint(session_id: str, body: UpdateSessionRequest):
+    """Rename a chat session."""
+    sess = update_session(session_id, title=body.title)
+    if not sess:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return sess
+
+
+@app.delete("/api/sessions/{session_id}")
+def delete_session_endpoint(session_id: str):
+    """Delete a chat session and all its messages (cascade delete)."""
+    success = delete_session(session_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return {"deleted": True, "session_id": session_id}
+
+
+@app.get("/api/sessions/{session_id}/messages")
+def get_session_messages(session_id: str):
+    """Get all messages for a session ordered chronologically."""
+    sess = get_session(session_id)
+    if not sess:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return list_messages(session_id)
+
+
+@app.delete("/api/messages/{message_id}")
+def delete_message_endpoint(message_id: str):
+    """Delete a question and its answer pair."""
+    success = delete_message_pair(message_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Message not found")
+    return {"deleted": True, "message_id": message_id}
+
+
+@app.post("/api/sessions/{session_id}/chat")
+def session_chat_endpoint(session_id: str, request: SessionChatRequest, req: Request):
+    """
+    Save user message, create running assistant message, start graph in background thread,
+    and return {run_id, assistant_message_id} immediately.
+    """
+    sess = get_session(session_id)
+    if not sess:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    q_text = request.query.strip()
+
+    # Auto-title session from the first question (first 40 characters, no LLM call)
+    existing_msgs = list_messages(session_id)
+    if not existing_msgs or sess.get("title") in ("New Chat", "", None):
+        first_q = q_text[:40]
+        if first_q:
+            update_session(session_id, title=first_q)
+
+    # Follow-up context is built from the last completed assistant payload in DB, not checkpointer
+    prev_query, prev_tasks, prev_scope = get_last_completed_assistant_context(session_id)
+
+    # Save user message
+    create_message(
+        session_id=session_id,
+        role="user",
+        content=q_text,
+        status="complete",
+    )
+
+    # Create running assistant message
+    asst_msg_id = str(uuid.uuid4())
+    create_message(
+        message_id=asst_msg_id,
+        session_id=session_id,
+        role="assistant",
+        content="",
+        payload=None,
+        status="running",
+    )
+
+    run_id = str(uuid.uuid4())
+    register_cancel_token(run_id)
+
+    with _RUNS_LOCK:
+        _RUN_STATES[run_id] = {
+            "run_id": run_id,
+            "session_id": str(session_id),
+            "assistant_message_id": asst_msg_id,
+            "status": "running",
+            "plan": [],
+            "llm_calls": {"planner": 0, "agent": 0, "synthesizer": 0, "total": 0, "budget": settings.max_llm_calls_per_query},
+            "payload": None,
+            "error": None,
+            "start_time": time.perf_counter(),
+            "elapsed_ms": 0.0,
+        }
+
+    llm_override = getattr(req.app.state, "llm_override", None)
+    th = threading.Thread(
+        target=_execute_graph_run,
+        args=(
+            run_id,
+            asst_msg_id,
+            str(session_id),
+            q_text,
+            request.mode or "replay",
+            prev_query,
+            prev_tasks,
+            prev_scope,
+            llm_override,
+        ),
+        daemon=True,
+    )
+    with _RUNS_LOCK:
+        _RUN_THREADS[run_id] = th
+    th.start()
+
+    return {
+        "run_id": run_id,
+        "assistant_message_id": asst_msg_id,
+    }
+
+
+@app.get("/api/runs/{run_id}")
+def get_run_endpoint(run_id: str):
+    """
+    Returns status, plan steps with live task statuses, calls so far,
+    and when finished the full payload.
+    """
+    with _RUNS_LOCK:
+        run_state = _RUN_STATES.get(run_id)
+        if run_state:
+            res = {
+                "run_id": run_id,
+                "status": run_state["status"],
+                "plan": run_state.get("plan", []),
+                "llm_calls": run_state.get("llm_calls", {}),
+                "payload": run_state.get("payload"),
+                "elapsed_ms": run_state.get("elapsed_ms", 0.0),
+            }
+            if run_state.get("payload") and isinstance(run_state["payload"], dict):
+                for k, v in run_state["payload"].items():
+                    if k not in res:
+                        res[k] = v
+            return res
+
+    # Not in memory: check database for assistant message
+    msg = get_message_by_run_id(run_id)
+    if msg:
+        payload = msg.get("payload") or {}
+        res = {
+            "run_id": run_id,
+            "status": msg.get("status"),
+            "plan": payload.get("plan", []),
+            "llm_calls": payload.get("llm_calls", {}),
+            "payload": payload,
+            "elapsed_ms": payload.get("elapsed_ms", 0.0),
+        }
+        for k, v in payload.items():
+            if k not in res:
+                res[k] = v
+        return res
+
+    raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found")
+
+
+@app.post("/api/runs/{run_id}/stop")
+def stop_run_endpoint(run_id: str):
+    """Signal cancellation for an active run."""
+    token = get_cancel_token(run_id)
+    if token:
+        token.cancel()
+    with _RUNS_LOCK:
+        if run_id in _RUN_STATES:
+            if _RUN_STATES[run_id]["status"] == "running":
+                _RUN_STATES[run_id]["status"] = "stopped"
+            return {"run_id": run_id, "status": _RUN_STATES[run_id]["status"]}
+    return {"run_id": run_id, "status": "stopped"}
+
+
+@app.post("/api/messages/{message_id}/edit")
+def edit_message_endpoint(message_id: str, request: EditMessageRequest, req: Request):
+    """
+    Update the user message, delete all later messages in the session,
+    and start a new background run.
+    """
+    user_msg = get_message(message_id)
+    if not user_msg:
+        raise HTTPException(status_code=404, detail="Message not found")
+    if user_msg["role"] != "user":
+        raise HTTPException(status_code=400, detail="Only user messages can be edited")
+
+    session_id = user_msg["session_id"]
+    sess = get_session(session_id)
+    if not sess:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    new_query = request.query.strip()
+
+    # 1. Update the user message
+    update_message(message_id, content=new_query)
+
+    # 2. Delete all later messages in the session
+    delete_messages_after(session_id, message_id)
+
+    # 3. Check for auto-titling if this is the first message
+    all_msgs = list_messages(session_id)
+    if len(all_msgs) <= 1:
+        first_q = new_query[:40]
+        if first_q:
+            update_session(session_id, title=first_q)
+
+    # 4. Follow-up context from the last completed assistant message prior to this message
+    prev_query, prev_tasks, prev_scope = get_last_completed_assistant_context(
+        session_id, exclude_message_id=message_id
+    )
+
+    # 5. Create new running assistant message
+    asst_msg_id = str(uuid.uuid4())
+    create_message(
+        message_id=asst_msg_id,
+        session_id=session_id,
+        role="assistant",
+        content="",
+        payload=None,
+        status="running",
+    )
+
+    # 6. Start new run in background thread
+    run_id = str(uuid.uuid4())
+    register_cancel_token(run_id)
+
+    with _RUNS_LOCK:
+        _RUN_STATES[run_id] = {
+            "run_id": run_id,
+            "session_id": str(session_id),
+            "assistant_message_id": asst_msg_id,
+            "status": "running",
+            "plan": [],
+            "llm_calls": {"planner": 0, "agent": 0, "synthesizer": 0, "total": 0, "budget": settings.max_llm_calls_per_query},
+            "payload": None,
+            "error": None,
+            "start_time": time.perf_counter(),
+            "elapsed_ms": 0.0,
+        }
+
+    llm_override = getattr(req.app.state, "llm_override", None)
+    th = threading.Thread(
+        target=_execute_graph_run,
+        args=(
+            run_id,
+            asst_msg_id,
+            str(session_id),
+            new_query,
+            request.mode or "replay",
+            prev_query,
+            prev_tasks,
+            prev_scope,
+            llm_override,
+        ),
+        daemon=True,
+    )
+    with _RUNS_LOCK:
+        _RUN_THREADS[run_id] = th
+    th.start()
+
+    return {
+        "run_id": run_id,
+        "assistant_message_id": asst_msg_id,
+    }
+

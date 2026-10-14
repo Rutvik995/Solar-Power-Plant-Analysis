@@ -254,8 +254,8 @@ def build_graph(llm: Any = None, checkpointer=None, mode: str = "live", cache_na
             return _partial_answer(state, exc)
 
     def start_node(state: AgentState) -> dict:
-        """Assign a fresh run_id at the start of each invocation."""
-        return {"run_id": str(_uuid.uuid4())}
+        """Assign a fresh run_id if not already present."""
+        return {"run_id": state.get("run_id") or str(_uuid.uuid4())}
 
     g = StateGraph(AgentState)
 

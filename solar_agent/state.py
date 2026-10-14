@@ -61,11 +61,60 @@ class ValidationStatus(str, Enum):
 
 
 # ---------------------------------------------------------------------------
-# Exceptions
+# Exceptions & Cancellation
 # ---------------------------------------------------------------------------
+
+import threading
+
 
 class BudgetExceeded(RuntimeError):
     """Raised when the LLM call counter exceeds max_llm_calls_per_query."""
+
+
+class Cancelled(RuntimeError):
+    """Raised when an active run is cancelled via CancelToken."""
+
+    def __init__(self, message: str = "Execution cancelled", partial_results: dict | None = None) -> None:
+        super().__init__(message)
+        self.partial_results = partial_results or {}
+
+
+class CancelToken:
+    """Thread-safe cancellation token wrapping a threading.Event."""
+
+    def __init__(self, event: threading.Event | None = None) -> None:
+        self._event = event or threading.Event()
+
+    def cancel(self) -> None:
+        self._event.set()
+
+    def is_cancelled(self) -> bool:
+        return self._event.is_set()
+
+    def check(self, partial_results: dict | None = None) -> None:
+        if self._event.is_set():
+            raise Cancelled("Run was cancelled by user.", partial_results=partial_results)
+
+
+_RUN_CANCEL_TOKENS: dict[str, CancelToken] = {}
+_RUN_CANCEL_LOCK = threading.Lock()
+
+
+def register_cancel_token(run_id: str, token: CancelToken | None = None) -> CancelToken:
+    tok = token or CancelToken()
+    with _RUN_CANCEL_LOCK:
+        _RUN_CANCEL_TOKENS[run_id] = tok
+    return tok
+
+
+def get_cancel_token(run_id: str) -> CancelToken | None:
+    with _RUN_CANCEL_LOCK:
+        return _RUN_CANCEL_TOKENS.get(run_id)
+
+
+def unregister_cancel_token(run_id: str) -> None:
+    with _RUN_CANCEL_LOCK:
+        _RUN_CANCEL_TOKENS.pop(run_id, None)
 
 
 # ---------------------------------------------------------------------------

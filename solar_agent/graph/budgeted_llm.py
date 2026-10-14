@@ -128,6 +128,12 @@ class BudgetedLLM:
         # Extract run_id from kwargs (passed by graph nodes) or use default
         run_id: str = kwargs.pop("run_id", _DEFAULT_RUN_ID)
 
+        # 0. Cancellation check (checked before each call)
+        from solar_agent.state import get_cancel_token
+        token = kwargs.pop("cancel_token", None) or get_cancel_token(run_id)
+        if token is not None:
+            token.check()
+
         # 1. Budget check (blocked before making call)
         with self._lock:
             current = self._counters.get(run_id, 0)

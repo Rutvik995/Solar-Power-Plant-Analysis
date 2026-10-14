@@ -23,7 +23,7 @@ from typing import Any
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import BaseTool
 
-from solar_agent.state import TaskResult, TaskStatus, BudgetExceeded
+from solar_agent.state import TaskResult, TaskStatus, BudgetExceeded, Cancelled
 from solar_agent.graph.llm_recorder import CacheMissError
 
 logger = logging.getLogger(__name__)
@@ -66,6 +66,11 @@ class BaseSpecialistAgent:
             flagged_items: list[dict] = []
             anomaly_sentence: str = "Anomalies found: none."
             for _iteration in range(MAX_ITERATIONS):
+                from solar_agent.state import get_cancel_token
+                token = get_cancel_token(run_id)
+                if token:
+                    token.check()
+
                 # On the last iteration call the LLM with tools unbound (never use tool_choice="none")
                 if _iteration == MAX_ITERATIONS - 1:
                     active_llm = self._raw_llm
@@ -75,7 +80,7 @@ class BaseSpecialistAgent:
 
                 try:
                     response: AIMessage = active_llm.invoke(messages, run_id=run_id)
-                except BudgetExceeded:
+                except (BudgetExceeded, Cancelled):
                     raise
                 except Exception as exc:
                     err_str = str(exc)
@@ -236,7 +241,7 @@ class BaseSpecialistAgent:
 
             result = self._parse_result(task_id, messages, tool_calls_made, flagged_items=flagged_items, anomaly_sentence=anomaly_sentence)
 
-        except BudgetExceeded:
+        except (BudgetExceeded, Cancelled):
             raise
         except Exception as exc:
             logger.exception("Agent '%s' failed on task '%s': %s", self.name, task_id, exc)
@@ -380,6 +385,11 @@ class SingleCallAgent:
     def run(self, task_id: str, description: str, inputs: dict[str, Any], run_id: str = "__default__") -> TaskResult:
         t_start = time.monotonic()
         tool_calls_made: list[str] = []
+
+        from solar_agent.state import get_cancel_token
+        token = get_cancel_token(run_id)
+        if token:
+            token.check()
 
         # Build human message
         human_parts = [f"Task: {description}", "\nInputs:"]
@@ -574,7 +584,7 @@ class SingleCallAgent:
                 latency_ms=(time.monotonic() - t_start) * 1000,
             )
 
-        except BudgetExceeded:
+        except (BudgetExceeded, Cancelled):
             raise
         except Exception as exc:
             logger.exception(

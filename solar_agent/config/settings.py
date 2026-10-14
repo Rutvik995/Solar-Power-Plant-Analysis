@@ -38,6 +38,10 @@ class Settings(BaseSettings):
         default="postgresql+psycopg://solar_ro:password@localhost:5432/solardata",
         description="Read-only PostgreSQL connection string (psycopg v3 driver).",
     )
+    chat_database_url: str = Field(
+        default="",
+        description="Write-enabled database connection string for chat sessions and messages (defaults to database_url).",
+    )
 
     # --- LLM Models & Providers ---
     # Default provider: "groq". Also supports: "gemini", "anthropic", "openai", "ollama"

@@ -29,7 +29,7 @@ from solar_agent.agents.fault_agent import FaultAgent
 from solar_agent.agents.performance_agent import PerformanceAgent
 from solar_agent.config.settings import settings
 from solar_agent.graph.data_store import DataStore
-from solar_agent.state import AgentState, Plan, Task, TaskResult, TaskStatus, BudgetExceeded
+from solar_agent.state import AgentState, Plan, Task, TaskResult, TaskStatus, BudgetExceeded, Cancelled, get_cancel_token
 
 logger = logging.getLogger(__name__)
 
@@ -154,6 +154,10 @@ class Executor:
 
         results: dict[str, TaskResult] = dict(state.get("results") or {})
 
+        token = get_cancel_token(run_id)
+        if token:
+            token.check(partial_results=results)
+
         layers = plan.topological_layers()
         next_layer_ids = self._find_next_layer(layers, results)
 
@@ -168,6 +172,8 @@ class Executor:
         try:
             new_results = self._run_layer(layer_tasks, results, run_id=run_id)
             results.update(new_results)
+            if token:
+                token.check(partial_results=results)
             warnings_list = list(state.get("warnings") or [])
             for tr in new_results.values():
                 if hasattr(tr, "warnings") and tr.warnings:
@@ -175,6 +181,11 @@ class Executor:
                         if w not in warnings_list:
                             warnings_list.append(w)
             return {"results": results, "warnings": warnings_list}
+        except Cancelled as exc:
+            if hasattr(exc, "partial_results") and exc.partial_results:
+                results.update(exc.partial_results)
+            exc.partial_results = results
+            raise exc
         except BudgetExceeded as exc:
             # The exception might have partial results attached from _run_layer
             if hasattr(exc, "partial_results"):
@@ -288,6 +299,9 @@ class Executor:
                         status=TaskStatus.FAILED,
                         error=f"Task timed out after {timeout} seconds.",
                     )
+                except Cancelled as exc:
+                    exc.partial_results = new_results
+                    raise
                 except BudgetExceeded as exc:
                     exc.partial_results = new_results
                     raise
@@ -312,6 +326,9 @@ class Executor:
         last_result: TaskResult | None = None
 
         for attempt in range(max_attempts):
+            token = get_cancel_token(run_id)
+            if token:
+                token.check()
             try:
                 result = agent.run(task.id, task.description, inputs, run_id=run_id)
                 if result.status == TaskStatus.DONE:
@@ -329,7 +346,7 @@ class Executor:
                         task.id, attempt + 1, max_attempts, result.error,
                     )
                     time.sleep(2)
-            except BudgetExceeded:
+            except (BudgetExceeded, Cancelled):
                 raise
             except Exception as exc:
                 err_str = str(exc).lower()
