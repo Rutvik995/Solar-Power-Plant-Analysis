@@ -42,12 +42,17 @@ export default function Sidebar({ isOpen = true, onToggle }) {
   const [renameModalSession, setRenameModalSession] = useState(null);
   const [renameTitle, setRenameTitle] = useState('');
   const [deleteModalSession, setDeleteModalSession] = useState(null);
+  const [deleteError, setDeleteError] = useState(null);
+  const [renameError, setRenameError] = useState(null);
+  const [deleting, setDeleting] = useState(false);
 
   const menuRef = useRef(null);
 
   const { data: sessions = [], isLoading } = useQuery({
     queryKey: ['sessions'],
     queryFn: fetchSessions,
+    staleTime: 0,                // Always fetch fresh — deleted sessions must not re-appear
+    refetchOnWindowFocus: true,  // Re-validate when tab regains focus
   });
 
   // Close context dropdown on outside click
@@ -87,12 +92,14 @@ export default function Sidebar({ isOpen = true, onToggle }) {
     if (!renameModalSession) return;
     const trimmed = renameTitle.trim();
     if (!trimmed) return;
+    setRenameError(null);
     try {
       await renameSession(renameModalSession.id, trimmed);
-      await queryClient.invalidateQueries({ queryKey: ['sessions'] });
+      // Refetch from server to confirm the rename persisted
+      await queryClient.refetchQueries({ queryKey: ['sessions'] });
       setRenameModalSession(null);
     } catch (err) {
-      console.error('Failed to rename session:', err);
+      setRenameError(err.message || 'Failed to rename session');
     }
   };
 
@@ -103,17 +110,23 @@ export default function Sidebar({ isOpen = true, onToggle }) {
   };
 
   const handleConfirmDelete = async () => {
-    if (!deleteModalSession) return;
+    if (!deleteModalSession || deleting) return;
+    setDeleteError(null);
+    setDeleting(true);
     try {
       await deleteSession(deleteModalSession.id);
-      await queryClient.invalidateQueries({ queryKey: ['sessions'] });
+      // Refetch from server BEFORE closing modal — confirms the row is gone
+      await queryClient.refetchQueries({ queryKey: ['sessions'] });
       if (activeSessionId === deleteModalSession.id) {
         localStorage.removeItem('solar_last_session_id');
         navigate('/');
       }
       setDeleteModalSession(null);
     } catch (err) {
-      console.error('Failed to delete session:', err);
+      // Do NOT close the modal — show the error so the user knows it failed
+      setDeleteError(err.message || 'Failed to delete session. Please try again.');
+    } finally {
+      setDeleting(false);
     }
   };
 
@@ -284,21 +297,28 @@ export default function Sidebar({ isOpen = true, onToggle }) {
               <p className="text-xs text-[#64748B] leading-relaxed">
                 Are you sure you want to delete <span className="font-medium text-[#0F172A]">"{deleteModalSession.title}"</span>? All messages and traces in this session will be permanently deleted.
               </p>
+              {deleteError && (
+                <p className="text-xs text-[#DC2626] bg-[#FEF2F2] border border-[#DC2626]/20 rounded px-2 py-1.5">
+                  {deleteError}
+                </p>
+              )}
             </div>
             <div className="flex items-center justify-end gap-2 pt-2">
               <button
                 type="button"
-                onClick={() => setDeleteModalSession(null)}
-                className="px-3 py-1.5 text-xs font-medium rounded-lg border border-[#E2E8F0] hover:bg-[#F8FAFC] text-[#64748B] hover:text-[#0F172A] transition-colors"
+                onClick={() => { setDeleteModalSession(null); setDeleteError(null); }}
+                disabled={deleting}
+                className="px-3 py-1.5 text-xs font-medium rounded-lg border border-[#E2E8F0] hover:bg-[#F8FAFC] text-[#64748B] hover:text-[#0F172A] transition-colors disabled:opacity-50"
               >
                 Cancel
               </button>
               <button
                 type="button"
                 onClick={handleConfirmDelete}
-                className="px-3 py-1.5 text-xs font-medium rounded-lg bg-[#DC2626] hover:bg-[#B91C1C] text-white transition-colors"
+                disabled={deleting}
+                className="px-3 py-1.5 text-xs font-medium rounded-lg bg-[#DC2626] hover:bg-[#B91C1C] text-white transition-colors disabled:opacity-60"
               >
-                Delete
+                {deleting ? 'Deleting…' : 'Delete'}
               </button>
             </div>
           </div>
@@ -317,16 +337,19 @@ export default function Sidebar({ isOpen = true, onToggle }) {
                 onChange={(e) => setRenameTitle(e.target.value)}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter') handleConfirmRename();
-                  if (e.key === 'Escape') setRenameModalSession(null);
+                  if (e.key === 'Escape') { setRenameModalSession(null); setRenameError(null); }
                 }}
                 autoFocus
                 className="w-full px-3 py-1.5 text-xs border border-[#E2E8F0] rounded-lg focus:outline-none focus:border-[#2563EB] text-[#0F172A]"
               />
+              {renameError && (
+                <p className="text-xs text-[#DC2626]">{renameError}</p>
+              )}
             </div>
             <div className="flex items-center justify-end gap-2 pt-2">
               <button
                 type="button"
-                onClick={() => setRenameModalSession(null)}
+                onClick={() => { setRenameModalSession(null); setRenameError(null); }}
                 className="px-3 py-1.5 text-xs font-medium rounded-lg border border-[#E2E8F0] hover:bg-[#F8FAFC] text-[#64748B] hover:text-[#0F172A] transition-colors"
               >
                 Cancel

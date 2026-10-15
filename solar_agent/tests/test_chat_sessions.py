@@ -513,3 +513,71 @@ def test_auto_title_based_on_question(tmp_path, monkeypatch):
     cs._CHAT_ENGINE = None
 
 
+def test_delete_persists_across_restart(tmp_path, monkeypatch):
+    """
+    Delete a session via the API, then simulate a server restart (new app instance +
+    fresh DB engine), and confirm the session and its messages are gone.
+
+    This is the core regression test for 'chats come back after restarting the server'.
+    """
+    db_file = tmp_path / "restart_delete.db"
+    db_url = f"sqlite:///{db_file}"
+    monkeypatch.setattr(settings, "chat_database_url", db_url)
+    monkeypatch.setattr(settings, "database_url", db_url)
+
+    # --- Instance 1: create session + messages, then delete ---
+    cs._CHAT_ENGINE = None
+    cs.init_chat_db()
+    client1 = TestClient(app)
+
+    res = client1.post("/api/sessions", json={"title": "Session To Delete"})
+    assert res.status_code == 200
+    session_id = res.json()["id"]
+
+    cs.create_message(session_id=session_id, role="user", content="Hello")
+    cs.create_message(session_id=session_id, role="assistant", content="Hi",
+                      status="complete", payload={"short_answer": "Hi"})
+
+    # Confirm the messages are there
+    res_before = client1.get(f"/api/sessions/{session_id}/messages")
+    assert res_before.status_code == 200
+    assert len(res_before.json()) == 2
+
+    # Delete via the API endpoint (simulates the UI "Delete" button)
+    res_del = client1.delete(f"/api/sessions/{session_id}")
+    assert res_del.status_code == 200
+    assert res_del.json()["deleted"] is True
+
+    # Verify immediately: session is gone, messages 404
+    res_sess_immediate = client1.get("/api/sessions")
+    assert not any(s["id"] == session_id for s in res_sess_immediate.json()), \
+        "Session still appears in /api/sessions immediately after deletion"
+
+    res_msgs_immediate = client1.get(f"/api/sessions/{session_id}/messages")
+    assert res_msgs_immediate.status_code == 404, \
+        "Messages endpoint should 404 after session deleted"
+
+    # --- Simulate server restart: dispose engine, reinitialise ---
+    cs.get_chat_engine().dispose()
+    cs._CHAT_ENGINE = None
+    cs.init_chat_db()  # runs CREATE TABLE IF NOT EXISTS + stale cleanup; must NOT restore rows
+
+    client2 = TestClient(app)
+
+    # The session must not exist in the new instance
+    res_sess_after = client2.get("/api/sessions")
+    assert res_sess_after.status_code == 200
+    session_ids_after = [s["id"] for s in res_sess_after.json()]
+    assert session_id not in session_ids_after, \
+        f"Session {session_id} reappeared after server restart — delete was not committed"
+
+    # Messages endpoint must still 404
+    res_msgs_after = client2.get(f"/api/sessions/{session_id}/messages")
+    assert res_msgs_after.status_code == 404, \
+        "Messages should remain gone after restart"
+
+    cs.get_chat_engine().dispose()
+    cs._CHAT_ENGINE = None
+
+
+
