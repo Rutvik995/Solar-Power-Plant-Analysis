@@ -20,6 +20,8 @@ PROMPTS_DIR = ROOT_DIR / "prompts"
 
 STATUS_CODES_PATH = CONFIG_DIR / "status_codes.yaml"
 SEMANTIC_LAYER_PATH = CONFIG_DIR / "semantic_layer.yaml"
+DISPLAY_LABELS_PATH = CONFIG_DIR / "display_labels.yaml"
+GLOSSARY_PATH = CONFIG_DIR / "glossary.yaml"
 
 
 # ---------------------------------------------------------------------------

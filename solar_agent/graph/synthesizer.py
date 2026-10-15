@@ -1,72 +1,79 @@
 """
 graph/synthesizer.py – Synthesizer node.
 
-Produces the final human-readable answer from the completed TaskResults.
+Produces the final human-readable answer from completed TaskResults.
+Synthesizer output is structured JSON:
+  - headline: one bold sentence with the answer, plain English.
+  - explanation: 1 to 2 sentences, no jargon, explaining what it means.
+  - key_points: 0 to 3 short bullets.
+  - notes: plain-language assumptions.
+Grounding checks apply to all numbers in these fields.
 
-Answer format (enforced via system prompt):
-  1. SHORT ANSWER  – 1-3 sentence direct answer to the user's question.
-  2. SUPPORTING TABLE (if applicable) – compact Markdown table of top entities.
-  3. ASSUMPTIONS & WARNINGS – any caveats, data-range limits, tool warnings.
-
-Design constraints:
-  - The LLM writes the narrative. Numbers come ONLY from tool outputs (TaskResult.metrics).
-  - Ranking tables are constructed from compact_table_summary fields, not raw DataFrames.
-  - If validation failed (status=FAIL), a partial answer is surfaced with clear caveats.
+Rules:
+  - Tables built only from analysis task outputs (performance, fault, environment).
+  - No technical details in answer fields (row counts, task IDs, tool names, data_ref, call counts).
+  - Fallback is deterministic: templated headline and formatted table from step 1 (never raw metrics or the word 'fallback').
+  - Replay cache miss returns error_code='not_recorded' with clear message.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import re
+from datetime import date, datetime
+from typing import Any, Optional
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from solar_agent.graph.data_store import DataStore
+from solar_agent.graph.llm_recorder import CacheMissError
+from solar_agent.graph.validator import _extract_numbers, _is_grounded, _numbers_from_results
 from solar_agent.state import AgentState, TaskStatus, ValidationStatus
+from solar_agent.tools.table_formatter import (
+    build_analysis_tables,
+    format_energy_value,
+    format_pr_value,
+    sanitize_answer_text,
+    tables_to_markdown,
+    translate_plain_language,
+)
 
 logger = logging.getLogger(__name__)
 
 _SYNTHESIZER_SYSTEM_PROMPT = """You are the Synthesizer for a Solar Power Plant Analysis system.
-Your job is to write a clear, grounded, human-readable answer to the user's question.
+Your job is to provide a clear, grounded, human-readable answer to the user's question.
 
-ANSWER FORMAT (always follow this structure):
-## Short Answer
-1-3 sentences directly answering the question. State the key finding.
-
-## Supporting Detail
-- Use a Markdown table when the answer involves ranking, comparison, faults, or soiling.
-- Do NOT attach per-number source citations like (t1) or (t2) inline. Source tasks will be presented in a single Sources footer.
-- Do NOT write prose paragraphs; use bullet points or a table.
-
-## Assumptions & Warnings
-- List any date clamping, missing data, or tool warnings.
-- State data availability, e.g. "Data available 2026-08-01 to 2026-09-26".
+You MUST respond strictly with a valid JSON object matching this schema:
+{
+  "headline": "**One bold sentence directly answering the question in plain English.**",
+  "explanation": "1 to 2 plain English sentences explaining what the result means without technical jargon.",
+  "key_points": [
+    "0 to 3 short bullet points highlighting key observations"
+  ],
+  "notes": [
+    "Plain-language assumptions, scope notes, or data limits"
+  ]
+}
 
 RULES:
-1. Use ONLY the numbers provided in the task summaries and tables below. DO NOT invent or estimate any numbers.
-2. Never compute sums, differences or percentages not present in the provided values. All numbers in your answer must come directly from the tool outputs.
-3. Write all numbers as plain digits with standard commas for thousands (e.g., 250,610, not 250 610 or thin spaces).
-4. If you have no data (e.g. all tasks failed), say so plainly.
-5. Keep the full answer under 300 words.
-6. When reporting multi-plant or comparison results, present each plant individually using its plant-specific metrics (plant_{id}_*), and include the all-plants totals if provided. Never describe an aggregate multi-plant result as a single plant or as 'the plant in question'.
-7. When reporting faults:
-   - Name the specific inverter IDs, dates, status codes, PR, and the exact flagging tool behind each conclusion.
-   - Include the status-code meaning from status_codes.yaml (e.g. Warning, Fault, Offline).
-   - State the same-day PR and irradiance of the other inverters in that block for comparison.
-   - Include a sentence on any statistical anomalies found, or state "none".
-   - Include the compact table of flagged items.
-8. When reporting soiling results per plant: Present cleaning events, soiling ratio min/avg, and loss % per plant in a Markdown table. You MUST mention any outlier plants with more than 2x the median loss.
+1. headline: Exactly ONE bold sentence wrapped in **...**. Directly answer the question.
+2. explanation: 1 to 2 sentences in plain English, explaining what it means. No technical jargon.
+3. key_points: 0 to 3 short bullet points.
+4. notes: Plain-language assumptions.
+5. NO TECHNICAL DETAILS IN ANSWER FIELDS: NEVER include row counts, task IDs (like t1, t2), tool names (like fetch_inverter_daily, compute_kpis_tool), data_ref, or call counts in headline, explanation, key_points, or notes. Those belong exclusively in the execution trace.
+6. Use ONLY the numbers provided in the task summaries and tables below. DO NOT invent or estimate any numbers. Every number must come directly from tool outputs.
+7. Write all numbers as plain digits with standard commas for thousands (e.g., 250,610).
+8. Report PR as a percentage (e.g. 82.5%).
 """
 
-
-import re
 
 def normalize_spaces(text: str) -> str:
     """Normalize U+202F, U+2009, U+200A and U+00A0 to a plain space."""
     if not text:
         return "" if text is not None and not isinstance(text, str) else text
     if not isinstance(text, str):
-        return text
+        text = str(text)
     for ch in ("\u202f", "\u2009", "\u200a", "\u00a0"):
         text = text.replace(ch, " ")
     return text
@@ -109,7 +116,7 @@ def clean_task_summary(text: Any) -> str:
             if isinstance(parsed, dict) and "summary" in parsed and parsed["summary"]:
                 text = str(parsed["summary"])
             elif isinstance(parsed, dict) and "tool" in parsed:
-                text = f"Tool '{parsed['tool']}' executed successfully."
+                text = f"Tool executed successfully."
             else:
                 text = "Task executed successfully."
         except Exception:
@@ -123,9 +130,7 @@ def clean_task_summary(text: Any) -> str:
 
     # 4. Strip **TaskResult** and TaskResult(...)
     text = re.sub(r"\*{0,2}TaskResult\*{0,2}(?:\([^)]*\))?:?", "", text, flags=re.IGNORECASE)
-    # Strip any remaining inline JSON objects
     text = re.sub(r"\{[\s\S]*?\}", "", text)
-    # Strip markdown headers, bullets, bolding
     text = re.sub(r"^[#*\-\s>]+", "", text, flags=re.MULTILINE)
     text = text.replace("**", "").replace("__", "")
 
@@ -205,34 +210,108 @@ def extract_structured_answers(final_ans: str) -> tuple[str, str]:
     return normalize_spaces(short_answer), normalize_spaces(details_markdown)
 
 
-def _build_compact_table(data_ref: str, key_cols: list[str], value_col: str, top_n: int = 10) -> str:
+def build_deterministic_fallback(
+    query: str,
+    plan: Any,
+    results: dict[str, Any],
+    assumptions: list[str],
+) -> tuple[str, str, list[str], list[str], str]:
     """
-    Build a compact Markdown table from a DataStore DataFrame for LLM context.
-    Returns at most top_n rows. Returns empty string if data unavailable.
+    Build a deterministic answer on failure:
+    - A templated headline (one bold sentence in plain English)
+    - Explanation (1-2 sentences)
+    - Key points (0-3 short bullets)
+    - Notes (plain-language assumptions)
+    - Formatted tables from step 1
+    Never outputs raw metrics or the phrase 'fallback'.
+    Never includes row counts, task IDs, tool names, data_ref, or call counts in answer fields.
     """
-    try:
-        df = DataStore.get_or_load(data_ref)
-        if df is None or df.empty:
-            return ""
-        cols = [c for c in key_cols + [value_col] if c in df.columns]
-        if not cols:
-            return ""
-        top = df.nsmallest(top_n, value_col) if value_col in df.columns else df.head(top_n)
-        return top[cols].to_markdown(index=False)
-    except Exception as exc:
-        logger.debug("Could not build compact table: %s", exc)
-        return ""
+    pr_vals: list[float] = []
+    yield_vals: list[float] = []
+    flagged_count = 0
+    plant_names: list[str] = []
+
+    if plan and hasattr(plan, "scope") and plan.scope and plan.scope.plant_ids:
+        plant_names = [f"Plant {pid}" for pid in plan.scope.plant_ids]
+    plant_str = ", ".join(plant_names) if plant_names else "the requested solar plants"
+
+    for tid, tr in results.items():
+        if not tr or getattr(tr, "status", None) != TaskStatus.DONE:
+            continue
+        metrics = getattr(tr, "metrics", {}) or {}
+        for k, v in metrics.items():
+            if ("performance_ratio" in k or k == "pr") and isinstance(v, (int, float)):
+                pr_vals.append(float(v))
+            if ("yield" in k or "energy" in k) and isinstance(v, (int, float)):
+                yield_vals.append(float(v))
+        flagged = metrics.get("flagged_items") or []
+        if flagged:
+            flagged_count += len(flagged)
+
+    # 1. Templated headline
+    if pr_vals and yield_vals:
+        pr_disp = format_pr_value(pr_vals[0])
+        yield_disp = format_energy_value(yield_vals[0])
+        headline = f"**{plant_str} produced {yield_disp} with a performance ratio of {pr_disp}.**"
+    elif pr_vals:
+        pr_disp = format_pr_value(pr_vals[0])
+        headline = f"**{plant_str} achieved a performance ratio of {pr_disp} across the evaluated period.**"
+    elif yield_vals:
+        yield_disp = format_energy_value(yield_vals[0])
+        headline = f"**{plant_str} produced {yield_disp} of electrical energy during this period.**"
+    elif flagged_count > 0:
+        headline = f"**Fault analysis identified {flagged_count} inverter events requiring inspection.**"
+    else:
+        headline = f"**Analysis completed for {plant_str}.**"
+
+    # 2. Explanation
+    explanation = f"Operational data and performance analysis have been compiled for {plant_str}."
+
+    # 3. Key points
+    key_points = []
+    if pr_vals:
+        key_points.append(f"Performance ratio: {format_pr_value(pr_vals[0])}")
+    if yield_vals:
+        key_points.append(f"Energy produced: {format_energy_value(yield_vals[0])}")
+    if flagged_count > 0:
+        key_points.append(f"Flagged inverter issues: {flagged_count}")
+
+    # 4. Notes (translated plain-language assumptions)
+    notes = [translate_plain_language(a) for a in assumptions if a]
+    if not notes:
+        notes = ["Data analysis is based on available telemetry records."]
+
+    # 5. Formatted tables from step 1
+    tables = build_analysis_tables(plan, results)
+    table_md = tables_to_markdown(tables)
+
+    # Clean narrative fields
+    headline = sanitize_answer_text(headline)
+    explanation = sanitize_answer_text(explanation)
+    key_points = [sanitize_answer_text(kp) for kp in key_points]
+    notes = [sanitize_answer_text(n) for n in notes]
+
+    # Assemble final markdown
+    final_parts = [headline, explanation]
+    if key_points:
+        final_parts.append("\n".join(f"- {kp}" for kp in key_points))
+    if table_md:
+        final_parts.append(table_md)
+    final_answer = "\n\n".join(final_parts)
+
+    return headline, explanation, key_points, notes, final_answer
 
 
 class Synthesizer:
-    """LangGraph node that composes the final answer from TaskResults."""
+    """LangGraph node that composes structured JSON and final answer from TaskResults."""
 
     def __init__(self, llm):
         self._llm = llm
 
     def synthesize(self, state: AgentState, run_id: str = "__default__") -> dict:
         """
-        Build the final answer and return a state patch with `final_answer`.
+        Build structured JSON and final answer.
+        Returns a state patch with headline, explanation, key_points, notes, tables, final_answer.
         """
         query = state.get("user_query", "")
         results = state.get("results") or {}
@@ -240,16 +319,17 @@ class Synthesizer:
         validation = state.get("validation")
         assumptions = list(state.get("assumptions") or [])
 
-        # Build structured task summaries for the LLM
-        task_summaries = []
-        table_context = []
+        # Build analysis tables directly in code (step 1)
+        analysis_tables = build_analysis_tables(plan, results)
+        table_context_md = tables_to_markdown(analysis_tables)
 
+        # Build structured task summaries for LLM context
+        task_summaries = []
         for task in (plan.tasks if plan else []):
             tr = results.get(task.id)
             if tr is None:
                 continue
 
-            # Ensure task summary is clean, one sentence, and spaces normalized
             clean_sum = clean_task_summary(tr.summary or "(no summary)")
             tr.summary = clean_sum
 
@@ -262,280 +342,208 @@ class Synthesizer:
             }
             task_summaries.append(entry)
 
-            # For ranking/performance tasks, build a compact table from the data_ref
-            if tr.status == TaskStatus.DONE and tr.data_ref and task.agent == "performance":
-                table_md = _build_compact_table(
-                    tr.data_ref,
-                    key_cols=["inverter_id", "block_id", "plant_id"],
-                    value_col="performance_ratio",
-                    top_n=10,
-                )
-                if table_md:
-                    table_context.append(
-                        f"### Ranking table from task {task.id} (performance agent):\n{table_md}"
-                    )
-
-            # For fault tasks: one row per inverter and date with flagged_by list; status-code meaning in assumption
+        # Format fault status-code meanings into assumptions
+        for task in (plan.tasks if plan else []):
             if task.agent == "fault":
-                flagged = (tr.metrics or {}).get("flagged_items") or []
+                tr = results.get(task.id)
+                flagged = (tr.metrics or {}).get("flagged_items") if tr else []
                 if flagged:
-                    import pandas as pd
-                    status_meanings_found: dict[int, str] = {}
-                    grouped_flagged: dict[tuple[str, str], dict[str, Any]] = {}
-
                     for item in flagged:
-                        key = (str(item.get("inverter_id", "")), str(item.get("date", "")))
                         sc_val = item.get("status_code")
                         sc_meaning = item.get("status_meaning")
                         if sc_val is not None and sc_meaning:
-                            try:
-                                status_meanings_found[int(sc_val)] = str(sc_meaning)
-                            except Exception:
-                                pass
+                            line = f"Status Code {sc_val}: {sc_meaning}"
+                            if line not in assumptions:
+                                assumptions.append(line)
 
-                        tool_flag = item.get("flagging_tool") or "fault_detector"
-                        if key not in grouped_flagged:
-                            grouped_flagged[key] = {
-                                "inverter_id": key[0],
-                                "block": str(item.get("block", "")),
-                                "date": key[1],
-                                "flagged_by": [tool_flag],
-                                "pr": item.get("pr"),
-                                "peer_pr": item.get("peer_pr"),
-                                "peer_irradiance": item.get("peer_irradiance"),
-                            }
-                        else:
-                            if tool_flag not in grouped_flagged[key]["flagged_by"]:
-                                grouped_flagged[key]["flagged_by"].append(tool_flag)
-
-                    # Put status-code meanings in assumption lines, not columns
-                    for sc, meaning in sorted(status_meanings_found.items()):
-                        line = f"Status Code {sc}: {meaning}"
-                        if line not in assumptions:
-                            assumptions.append(line)
-
-                    # Format compact table: 1 row per inverter and date, flagged_by list
-                    table_rows = []
-                    for g in list(grouped_flagged.values())[:10]:
-                        table_rows.append({
-                            "inverter_id": g["inverter_id"],
-                            "block": g["block"],
-                            "date": g["date"],
-                            "flagged_by": ", ".join(g["flagged_by"]),
-                            "pr": g["pr"],
-                            "peer_pr": g["peer_pr"],
-                            "peer_irradiance": g["peer_irradiance"],
-                        })
-
-                    f_df = pd.DataFrame(table_rows)
-                    cols = [
-                        c
-                        for c in [
-                            "inverter_id",
-                            "block",
-                            "date",
-                            "flagged_by",
-                            "pr",
-                            "peer_pr",
-                            "peer_irradiance",
-                        ]
-                        if c in f_df.columns
-                    ]
-                    table_md = f_df[cols].to_markdown(index=False)
-                    table_context.append(
-                        f"### Flagged fault items from task {task.id} (fault agent):\n{table_md}"
-                    )
-                anomaly_sent = (tr.metrics or {}).get("anomaly_sentence")
-                if anomaly_sent:
-                    table_context.append(
-                        f"### Anomaly findings from task {task.id} (fault agent):\n{anomaly_sent}"
-                    )
-
-            # For environment soiling tasks, build soiling table per plant
-            if task.agent == "environment":
-                metrics = tr.metrics or {}
-                import pandas as pd
-                pids = sorted(list({int(k.split("_")[1]) for k in metrics if k.startswith("plant_") and k.split("_")[1].isdigit()}))
-                if pids:
-                    soiling_rows = []
-                    for pid in pids:
-                        soiling_rows.append({
-                            "Plant": f"Plant {pid}",
-                            "Cleaning events": metrics.get(f"plant_{pid}_cleaning_events", 0),
-                            "Soiling ratio min": metrics.get(f"plant_{pid}_soiling_ratio_min", "-"),
-                            "Soiling ratio avg": metrics.get(f"plant_{pid}_soiling_ratio_avg", "-"),
-                            "Loss %": f"{metrics.get(f'plant_{pid}_soiling_loss_pct', 0)}%",
-                            "Loss (kWh)": f"{metrics.get(f'plant_{pid}_soiling_loss_kwh', 0):,}",
-                        })
-                    s_df = pd.DataFrame(soiling_rows)
-                    table_context.append(
-                        f"### Soiling analysis per plant from task {task.id} (environment agent):\n{s_df.to_markdown(index=False)}"
-                    )
-
-        # Partial results caveat
-        caveat = ""
-        if validation and validation.status == ValidationStatus.FAIL:
-            failed_desc = [i.description for i in validation.issues if i.severity == "error"]
-            caveat = (
-                "\n\nNOTE: Some tasks failed — results are partial:\n"
-                + "\n".join(f"  - {d}" for d in failed_desc)
-            )
-
+        # Build human prompt
         human_text = (
             f"User question: {query}\n\n"
             f"Task results:\n{json.dumps(task_summaries, indent=2, default=str)}"
         )
-        if table_context:
-            human_text += "\n\nData tables for reference:\n" + "\n\n".join(table_context)
+        if table_context_md:
+            human_text += "\n\nData tables for reference:\n" + table_context_md
         if assumptions:
-            human_text += "\n\nAssumptions made during data resolution:\n" + "\n".join(f"  - {a}" for a in assumptions)
-        if caveat:
-            human_text += caveat
+            human_text += "\n\nAssumptions made during data resolution:\n" + "\n".join(
+                f"  - {translate_plain_language(a)}" for a in assumptions
+            )
 
-        from solar_agent.graph.validator import _extract_numbers, _numbers_from_results, _is_grounded
+        ground_values = _numbers_from_results(results)
+        if table_context_md:
+            ground_values.extend(_extract_numbers(table_context_md))
 
-        def _generate():
+        def _generate() -> str:
+            resp = self._llm.invoke([
+                SystemMessage(content=_SYNTHESIZER_SYSTEM_PROMPT),
+                HumanMessage(content=human_text),
+            ], run_id=run_id)
+            return resp.content
+
+        def _parse_llm_json(raw_resp: str) -> Optional[dict]:
+            if not raw_resp or not isinstance(raw_resp, str):
+                return None
+            txt = raw_resp.strip()
+            # Strip markdown fences
+            if txt.startswith("```"):
+                txt = re.sub(r"^```(?:json)?\s*", "", txt)
+                txt = re.sub(r"\s*```$", "", txt)
+                txt = txt.strip()
             try:
-                resp = self._llm.invoke([
-                    SystemMessage(content=_SYNTHESIZER_SYSTEM_PROMPT),
-                    HumanMessage(content=human_text),
-                ], run_id=run_id)
-                return resp.content
-            except Exception as e:
-                from solar_agent.graph.llm_recorder import CacheMissError
-                if isinstance(e, CacheMissError):
-                    # Check if an existing cached Synthesizer response answers this question
-                    inner = getattr(self._llm, "_inner", self._llm)
-                    cache = getattr(inner, "cache", {})
-                    q_words = [w.strip("?,.") for w in query.lower().split() if len(w.strip("?,.")) > 3]
-                    best_match = None
-                    best_score = 0
-                    for v in cache.values():
-                        c = v.get("content", "")
-                        if "## Short Answer" in c:
-                            c_lower = c.lower()
-                            score = sum(1 for w in q_words if w in c_lower)
-                            for term in ["zero", "soiling", "fault", "peer", "ranking", "ratio", "expected", "clean", "without", "highest", "lowest", "total", "underperform"]:
-                                if term in query.lower() and term in c_lower:
-                                    score += 3
-                            for p_num in range(1, 6):
-                                if f"plant {p_num}" in query.lower() and f"plant {p_num}" in c_lower:
-                                    score += 4
-                                elif f"plant {p_num}" in query.lower() and f"plant {p_num}" not in c_lower:
-                                    score -= 2
-                            if score > best_score:
-                                best_score = score
-                                best_match = c
-                    if best_match and best_score >= 2:
-                        return best_match
-                raise
+                data = json.loads(txt)
+                if isinstance(data, dict) and "headline" in data:
+                    return data
+            except Exception:
+                pass
+            # Try finding json object substring
+            m = re.search(r"\{[\s\S]*\}", txt)
+            if m:
+                try:
+                    data = json.loads(m.group(0))
+                    if isinstance(data, dict) and "headline" in data:
+                        return data
+                except Exception:
+                    pass
+            return None
 
-        def _fallback(task_summaries):
-            lines = ["Here are the raw metrics (fallback due to generation failure or ungrounded numbers):"]
-            for ts in task_summaries:
-                lines.append(f"\n**[{ts['task_id']} / {ts['agent']}]** {ts['summary']}")
-                for k, v in ts["metrics"].items():
-                    lines.append(f"  - {k}: {v}")
-            return "\n".join(lines)
+        headline: Optional[str] = None
+        explanation: Optional[str] = None
+        key_points: list[str] = []
+        notes: list[str] = []
+        final_answer_str: str = ""
 
         try:
-            answer = _generate()
-            # Validator Grounding
-            ground_values = _numbers_from_results(results)
-            for table_md in table_context:
-                ground_values.extend(_extract_numbers(table_md))
+            raw_output = _generate()
+            parsed_data = _parse_llm_json(raw_output)
 
-            answer_numbers = _extract_numbers(answer)
-            ungrounded = [n for n in answer_numbers if not _is_grounded(n, ground_values)]
-            
-            if ungrounded:
-                logger.warning(f"Synthesizer answer ungrounded numbers: {ungrounded}. Regenerating once...")
-                human_text += f"\n\nCRITICAL FIX: Your last answer hallucinates these numbers: {ungrounded}. Regenerate using ONLY the provided metrics."
-                answer = _generate()
-                # Check again
-                answer_numbers2 = _extract_numbers(answer)
-                ungrounded2 = [n for n in answer_numbers2 if not _is_grounded(n, ground_values)]
-                if ungrounded2:
-                    logger.error(f"Synthesizer answer STILL ungrounded: {ungrounded2}. Using templated fallback.")
-                    answer = _fallback(task_summaries)
+            if parsed_data:
+                h_candidate = str(parsed_data.get("headline", "")).strip()
+                # Ensure headline is wrapped in bold
+                if not (h_candidate.startswith("**") and h_candidate.endswith("**")):
+                    h_candidate = f"**{h_candidate.strip('*')}**"
+                e_candidate = str(parsed_data.get("explanation", "")).strip()
+                kp_candidate = [str(x) for x in parsed_data.get("key_points", []) if x]
+                n_candidate = [str(x) for x in parsed_data.get("notes", []) if x]
+
+                # Grounding check
+                full_text_to_check = f"{h_candidate} {e_candidate} {' '.join(kp_candidate)} {' '.join(n_candidate)}"
+                answer_numbers = _extract_numbers(full_text_to_check)
+                ungrounded = [n for n in answer_numbers if not _is_grounded(n, ground_values)]
+
+                if ungrounded:
+                    logger.warning(f"Synthesizer ungrounded numbers: {ungrounded}. Regenerating once...")
+                    retry_text = human_text + f"\n\nCRITICAL FIX: Your last answer contained ungrounded numbers: {ungrounded}. Regenerate using ONLY provided numbers."
+                    resp2 = self._llm.invoke([
+                        SystemMessage(content=_SYNTHESIZER_SYSTEM_PROMPT),
+                        HumanMessage(content=retry_text),
+                    ], run_id=run_id)
+                    parsed_data2 = _parse_llm_json(resp2.content)
+                    if parsed_data2:
+                        h_candidate = str(parsed_data2.get("headline", "")).strip()
+                        if not (h_candidate.startswith("**") and h_candidate.endswith("**")):
+                            h_candidate = f"**{h_candidate.strip('*')}**"
+                        e_candidate = str(parsed_data2.get("explanation", "")).strip()
+                        kp_candidate = [str(x) for x in parsed_data2.get("key_points", []) if x]
+                        n_candidate = [str(x) for x in parsed_data2.get("notes", []) if x]
+                        full_check2 = f"{h_candidate} {e_candidate} {' '.join(kp_candidate)} {' '.join(n_candidate)}"
+                        nums2 = _extract_numbers(full_check2)
+                        ungrounded2 = [n for n in nums2 if not _is_grounded(n, ground_values)]
+                        if ungrounded2:
+                            logger.error(f"Still ungrounded: {ungrounded2}. Using deterministic fallback.")
+                            parsed_data = None
+                        else:
+                            parsed_data = parsed_data2
+                    else:
+                        parsed_data = None
+
+            if parsed_data:
+                headline = h_candidate
+                explanation = e_candidate
+                key_points = kp_candidate
+                notes = [translate_plain_language(n) for n in n_candidate]
+            else:
+                # Deterministic fallback on ungrounded or non-json failure
+                headline, explanation, key_points, notes, final_answer_str = build_deterministic_fallback(
+                    query, plan, results, assumptions
+                )
+
+        except CacheMissError:
+            # Replay cache miss: return error_code='not_recorded' with clear message
+            msg = "This query was not recorded in replay cache. Switch to live or record mode to execute."
+            return {
+                "error_code": "not_recorded",
+                "error_message": msg,
+                "final_answer": msg,
+                "short_answer": msg,
+                "headline": f"**{msg}**",
+                "explanation": msg,
+                "key_points": [],
+                "notes": [],
+                "tables": [],
+                "assumptions": [],
+                "warnings": [msg],
+            }
         except Exception as exc:
-            logger.exception("Synthesizer LLM call failed: %s", exc)
-            answer = _fallback(task_summaries)
+            logger.exception("Synthesizer LLM execution failed: %s", exc)
+            headline, explanation, key_points, notes, final_answer_str = build_deterministic_fallback(
+                query, plan, results, assumptions
+            )
 
-        # Clean inline (t1), (t2) tags from narrative
-        import re
-        answer = re.sub(
-            r"\s*\((?:t\d+(?:,\s*t\d+)*|task\s*t\d+|performance task|fault task|environment task|data task)\)",
-            "",
-            answer,
-        )
+        # Sanitize all answer fields to guarantee no technical details appear
+        headline = sanitize_answer_text(headline or "")
+        explanation = sanitize_answer_text(explanation or "")
+        key_points = [sanitize_answer_text(kp) for kp in key_points]
+        notes = [sanitize_answer_text(n) for n in notes]
 
-        # Ensure fault anomaly sentence is included if present
+        # Ensure fault anomaly sentence is included in explanation / key points if present
         for task in (plan.tasks if plan else []):
             if task.agent == "fault":
                 tr = results.get(task.id)
                 if tr:
                     anomaly_sent = (tr.metrics or {}).get("anomaly_sentence")
-                    if anomaly_sent and "anomal" not in answer.lower():
-                        answer += f"\n\n{anomaly_sent}"
+                    if anomaly_sent and "anomal" not in explanation.lower() and not any("anomal" in kp.lower() for kp in key_points):
+                        key_points.append(sanitize_answer_text(anomaly_sent))
 
-        # Build deterministic Sources footer
+        # Build details_markdown
+        details_parts = []
+        if explanation:
+            details_parts.append(explanation)
+        if key_points:
+            details_parts.append("\n" + "\n".join(f"- {kp}" for kp in key_points))
+        details_markdown = "\n\n".join(details_parts).strip()
+
+        # Build Sources footer
         completed_tasks = [
             task.id
             for task in (plan.tasks if plan else [])
             if task.id in results and getattr(results[task.id], "status", None) == TaskStatus.DONE
         ]
-        if not completed_tasks:
-            completed_tasks = [
-                k for k, v in results.items() if getattr(v, "status", None) == TaskStatus.DONE
-            ]
-        if not completed_tasks:
-            completed_tasks = [task.id for task in (plan.tasks if plan else [])]
         sources_footer = f"Sources: {', '.join(completed_tasks)}" if completed_tasks else "Sources: none"
 
-        # Collect assumptions deterministically
-        all_assumptions: list[str] = list(state.get("assumptions") or [])
-        try:
-            from solar_agent.db import queries as q
-            min_d = q.get_min_log_date()
-            max_d = q.get_max_log_date()
-            avail_line = f"Data available {min_d.isoformat()} to {max_d.isoformat()}"
-        except Exception:
-            avail_line = "Data available 2026-08-01 to 2026-09-26"
-
-        if not any("Data available" in a for a in all_assumptions):
+        # Assumptions
+        all_assumptions = list(notes)
+        if not any("data available" in a.lower() for a in all_assumptions):
+            try:
+                from solar_agent.db import queries as q
+                min_d = q.get_min_log_date()
+                max_d = q.get_max_log_date()
+                avail_line = translate_plain_language(f"Data available {min_d.isoformat()} to {max_d.isoformat()}")
+            except Exception:
+                avail_line = "Data is available from 1 Aug 2026 to 26 Sep 2026."
             all_assumptions.insert(0, avail_line)
 
-        # Collect all warnings deterministically
-        all_warnings: list[str] = list(state.get("warnings") or [])
+        # Warnings
+        all_warnings: list[str] = []
         for tr in results.values():
             if hasattr(tr, "warnings") and tr.warnings:
                 for w in tr.warnings:
-                    if w not in all_warnings:
-                        all_warnings.append(w)
-
-        # Strip any LLM-written Assumptions, Warnings, or Sources headers
-        if "## Assumptions & Warnings" in answer:
-            answer = answer.split("## Assumptions & Warnings")[0].rstrip()
-        elif "## Assumptions" in answer:
-            answer = answer.split("## Assumptions")[0].rstrip()
-        if "## Warnings" in answer:
-            answer = answer.split("## Warnings")[0].rstrip()
-        if "\nSources:" in answer:
-            answer = answer.split("\nSources:")[0].rstrip()
-        elif "\n## Sources" in answer:
-            answer = answer.split("\n## Sources")[0].rstrip()
+                    clean_w = translate_plain_language(w)
+                    if clean_w not in all_warnings:
+                        all_warnings.append(clean_w)
 
         assumptions_section = "\n\n## Assumptions\n" + "\n".join(f"- {a}" for a in all_assumptions)
-        if all_warnings:
-            warnings_section = "\n\n## Warnings\n" + "\n".join(f"- {w}" for w in all_warnings)
-        else:
-            warnings_section = "\n\n## Warnings\nNone"
+        warnings_section = "\n\n## Warnings\n" + ("\n".join(f"- {w}" for w in all_warnings) if all_warnings else "None")
 
-        # Deterministic Period analysed line computed from data
-        import pandas as pd
-        from datetime import date
-
+        # Period analysed line
         dates_found: list[date] = []
         for task in (plan.tasks if plan else []):
             tr = results.get(task.id)
@@ -553,33 +561,32 @@ class Synthesizer:
 
         if not dates_found and plan and plan.scope and plan.scope.start_date and plan.scope.end_date:
             dates_found = [plan.scope.start_date, plan.scope.end_date]
-
         if not dates_found:
-            try:
-                from solar_agent.db import queries as q
-                dates_found = [q.get_min_log_date(), q.get_max_log_date()]
-            except Exception:
-                dates_found = [date(2026, 9, 1), date(2026, 9, 26)]
+            dates_found = [date(2026, 9, 1), date(2026, 9, 26)]
 
         min_d_used = min(dates_found)
         max_d_used = max(dates_found)
         n_days_used = (max_d_used - min_d_used).days + 1
-        period_line = f"Period analysed: {min_d_used.isoformat()} to {max_d_used.isoformat()} of the data used ({n_days_used} days)"
+        period_line = f"Period analysed: {min_d_used.strftime('%d %b %Y')} to {max_d_used.strftime('%d %b %Y')} of the data used ({n_days_used} days)"
 
-        final_ans = (
-            answer.strip()
-            + f"\n\n{sources_footer}"
-            + assumptions_section
-            + warnings_section
-            + f"\n\n{period_line}"
-        )
+        # Assemble final answer markdown
+        ans_components = [headline, details_markdown]
+        if table_context_md:
+            ans_components.append(table_context_md)
+        ans_components.append(sources_footer + assumptions_section + warnings_section + f"\n\n{period_line}")
+
+        final_ans = "\n\n".join(c for c in ans_components if c).strip()
         final_ans = normalize_spaces(final_ans)
-        short_ans, details_md = extract_structured_answers(final_ans)
 
         patch = {
+            "headline": headline,
+            "explanation": explanation,
+            "key_points": key_points,
+            "notes": notes,
+            "short_answer": headline,
+            "details_markdown": details_markdown,
             "final_answer": final_ans,
-            "short_answer": short_ans,
-            "details_markdown": details_md,
+            "tables": analysis_tables,
             "warnings": all_warnings,
             "assumptions": all_assumptions,
             "previous_query": query,
@@ -596,8 +603,10 @@ class Synthesizer:
                 if t.agent != "data"
             ],
         }
+
         if plan and plan.scope:
             patch["previous_scope"] = plan.scope.model_dump()
         if plan and plan.intent:
             patch["previous_intent"] = plan.intent.value if hasattr(plan.intent, "value") else str(plan.intent)
+
         return patch

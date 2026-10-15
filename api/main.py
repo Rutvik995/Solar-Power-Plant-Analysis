@@ -62,6 +62,13 @@ from solar_agent.state import (
     register_cancel_token,
     unregister_cancel_token,
 )
+from solar_agent.graph.llm_recorder import CacheMissError
+from solar_agent.tools.table_formatter import (
+    build_analysis_tables,
+    load_glossary,
+    sanitize_answer_text,
+    translate_plain_language,
+)
 from solar_agent.tools import metrics as m
 from solar_agent.tools.fault_tools import _EXCLUDE_YIELD_CODES, _FAULT_CODES
 
@@ -592,9 +599,31 @@ def format_structured_payload(
 
     # 1. Error & Text outputs
     err_obj = None
-    if isinstance(exc, Cancelled):
+    error_code = None
+
+    if isinstance(exc, CacheMissError) or (exc and type(exc).__name__ == "CacheMissError"):
+        msg = "This query was not recorded in replay cache. Switch to live or record mode to execute."
+        ans = msg
+        short_answer = msg
+        headline = f"**{msg}**"
+        explanation = msg
+        key_points = []
+        notes = []
+        details_markdown = ""
+        error_code = "not_recorded"
+        err_obj = {
+            "code": 404,
+            "error_code": "not_recorded",
+            "type": "CacheMissError",
+            "message": msg,
+        }
+    elif isinstance(exc, Cancelled):
         ans = "Execution stopped by user."
         short_answer = "Execution stopped by user."
+        headline = "**Execution stopped by user.**"
+        explanation = "Execution was stopped before completion."
+        key_points = []
+        notes = []
         details_markdown = "Execution was stopped before completion."
         err_obj = {
             "code": 499,
@@ -604,6 +633,10 @@ def format_structured_payload(
     elif isinstance(exc, BudgetExceeded):
         ans = f"LLM call budget exceeded: {exc}"
         short_answer = f"LLM call budget exceeded: {exc}"
+        headline = f"**LLM call budget exceeded: {exc}**"
+        explanation = "The pipeline exceeded its allotted LLM call budget."
+        key_points = []
+        notes = []
         details_markdown = ""
         err_obj = {
             "code": 429,
@@ -613,6 +646,10 @@ def format_structured_payload(
     elif exc is not None:
         ans = f"Execution error: {exc}"
         short_answer = f"Execution error: {exc}"
+        headline = f"**Execution error: {exc}**"
+        explanation = str(exc)
+        key_points = []
+        notes = []
         details_markdown = ""
         err_obj = {
             "code": 400,
@@ -620,98 +657,81 @@ def format_structured_payload(
             "message": str(exc),
         }
     else:
-        ans = normalize_spaces(result.get("final_answer") or "")
-        short_answer = result.get("short_answer")
-        details_markdown = result.get("details_markdown")
-        if not short_answer or not details_markdown:
-            short_answer, details_markdown = extract_structured_answers(ans)
-        short_answer = normalize_spaces(short_answer)
-        details_markdown = normalize_spaces(details_markdown)
-        if "⚠ LLM call budget exceeded" in ans:
+        # Check if result was flagged as not_recorded
+        if result.get("error_code") == "not_recorded":
+            msg = result.get("error_message") or "This query was not recorded in replay cache. Switch to live or record mode to execute."
+            ans = msg
+            short_answer = msg
+            headline = f"**{msg}**"
+            explanation = msg
+            key_points = []
+            notes = []
+            details_markdown = ""
+            error_code = "not_recorded"
             err_obj = {
-                "code": 429,
-                "type": "BudgetExceeded",
-                "message": "LLM call budget exceeded during pipeline execution.",
+                "code": 404,
+                "error_code": "not_recorded",
+                "type": "CacheMissError",
+                "message": msg,
             }
+        else:
+            ans = normalize_spaces(result.get("final_answer") or "")
+            headline = result.get("headline")
+            explanation = result.get("explanation")
+            key_points = list(result.get("key_points") or [])
+            notes = list(result.get("notes") or [])
 
-    assumptions = list(result.get("assumptions") or [])
-    warnings = list(result.get("warnings") or [])
-    if isinstance(exc, Cancelled) and "Execution stopped by user." not in warnings:
-        warnings.append("Execution stopped by user.")
-    elif isinstance(exc, BudgetExceeded) and str(exc) not in warnings:
-        warnings.append(str(exc))
+            short_answer = result.get("short_answer")
+            details_markdown = result.get("details_markdown")
+            if not short_answer or not details_markdown:
+                sa_ext, dm_ext = extract_structured_answers(ans)
+                if not short_answer:
+                    short_answer = sa_ext
+                if not details_markdown:
+                    details_markdown = dm_ext
 
-    # 2. Tables: [{title, columns, rows}]
-    tables = []
-    for tid, tr in results_dict.items():
-        if tr and tr.data_ref:
-            df_table = DataStore.get(tr.data_ref)
-            if df_table is not None and not df_table.empty:
-                df_head = df_table.head(100).copy()
-                for c in df_head.columns:
-                    if pd.api.types.is_datetime64_any_dtype(df_head[c]) or any(
-                        isinstance(v, (date, datetime)) for v in df_head[c].dropna()
-                    ):
-                        df_head[c] = df_head[c].apply(
-                            lambda x: x.isoformat() if hasattr(x, "isoformat") else str(x) if pd.notna(x) else None
-                        )
+            if not headline:
+                headline = f"**{short_answer.strip('*')}**" if short_answer else "**Analysis complete.**"
+                if not (headline.startswith("**") and headline.endswith("**")):
+                    headline = f"**{headline.strip('*')}**"
+            if not short_answer:
+                short_answer = headline.strip("*").strip()
+            if not explanation:
+                explanation = details_markdown or ""
 
-                cols = [str(c) for c in df_head.columns]
-                is_flagged_table = "inverter_id" in cols and ("log_date" in cols or "date" in cols) and ("status_code" in cols or "status_meaning" in cols or "flagged" in str(tr.summary).lower())
+            short_answer = normalize_spaces(short_answer)
+            details_markdown = normalize_spaces(details_markdown)
+            if "⚠ LLM call budget exceeded" in ans:
+                err_obj = {
+                    "code": 429,
+                    "type": "BudgetExceeded",
+                    "message": "LLM call budget exceeded during pipeline execution.",
+                }
 
-                if is_flagged_table:
-                    date_col = "log_date" if "log_date" in cols else "date"
-                    grouped_f: dict[tuple[str, str], dict[str, Any]] = {}
-                    status_meanings_found = {}
+    raw_assumptions = list(result.get("assumptions") or [])
+    raw_warnings = list(result.get("warnings") or [])
+    if isinstance(exc, Cancelled) and "Execution stopped by user." not in raw_warnings:
+        raw_warnings.append("Execution stopped by user.")
+    elif isinstance(exc, BudgetExceeded) and str(exc) not in raw_warnings:
+        raw_warnings.append(str(exc))
 
-                    for _, r in df_head.iterrows():
-                        inv_id = str(r["inverter_id"])
-                        d_str = str(r[date_col])
-                        key = (inv_id, d_str)
-                        sc_val = r.get("status_code")
-                        sc_meaning = r.get("status_meaning")
-                        if pd.notna(sc_val) and sc_meaning:
-                            try:
-                                status_meanings_found[int(sc_val)] = str(sc_meaning)
-                            except Exception:
-                                pass
+    # Translate assumptions and warnings into plain language
+    assumptions = [translate_plain_language(a) for a in raw_assumptions if a]
+    warnings = [translate_plain_language(w) for w in raw_warnings if w]
+    if not notes and assumptions:
+        notes = list(assumptions)
 
-                        flag_reason = r.get("flagging_tool") or r.get("type") or "Fault"
-                        if key not in grouped_f:
-                            grouped_f[key] = {
-                                "inverter_id": inv_id,
-                                "date": d_str,
-                                "block": str(r.get("block_name", r.get("block_id", ""))),
-                                "flagged_by": [flag_reason],
-                                "pr": float(round(r["performance_ratio"], 4)) if "performance_ratio" in r and pd.notna(r["performance_ratio"]) else (float(round(r["pr"], 4)) if "pr" in r and pd.notna(r["pr"]) else None),
-                            }
-                        else:
-                            if flag_reason not in grouped_f[key]["flagged_by"]:
-                                grouped_f[key]["flagged_by"].append(flag_reason)
+    # Sanitize answer fields (no technical details in answer fields)
+    headline = sanitize_answer_text(headline or "")
+    explanation = sanitize_answer_text(explanation or "")
+    key_points = [sanitize_answer_text(kp) for kp in key_points]
+    notes = [sanitize_answer_text(n) for n in notes]
 
-                    for sc, meaning in sorted(status_meanings_found.items()):
-                        line = f"Status Code {sc}: {meaning}"
-                        if line not in assumptions:
-                            assumptions.append(line)
-
-                    flagged_cols = ["inverter_id", "date", "block", "flagged_by", "pr"]
-                    flagged_rows = [
-                        [g["inverter_id"], g["date"], g["block"], g["flagged_by"], g["pr"]]
-                        for g in grouped_f.values()
-                    ]
-                    tables.append({
-                        "title": f"Task {tid}: Flagged Inverters",
-                        "columns": flagged_cols,
-                        "rows": flagged_rows,
-                    })
-                else:
-                    rows = df_head.values.tolist()
-                    clean_title = clean_task_summary(tr.summary) if tr.summary else "Data Table"
-                    tables.append({
-                        "title": f"Task {tid}: {clean_title}",
-                        "columns": cols,
-                        "rows": rows,
-                    })
+    # 2. Tables: ONLY from analysis task outputs (performance, fault, environment)
+    if "tables" in result and isinstance(result["tables"], list) and result["tables"]:
+        tables = result["tables"]
+    else:
+        tables = build_analysis_tables(result.get("plan"), results_dict)
 
     # 3. Charts: [plotly_json]
     charts = []
@@ -766,21 +786,57 @@ def format_structured_payload(
             "budget": budget,
         }
 
-    return {
-        "short_answer": short_answer,
+    # 8. Glossary
+    glossary = load_glossary()
+
+    # 9. Trace: technical details (row counts, task IDs, tool names, data_ref, call counts)
+    row_counts: dict[str, int] = {}
+    data_refs: dict[str, str] = {}
+    for tid, tr in results_dict.items():
+        if tr:
+            if hasattr(tr, "metrics") and tr.metrics and "row_count" in tr.metrics:
+                row_counts[tid] = tr.metrics["row_count"]
+            if hasattr(tr, "data_ref") and tr.data_ref:
+                data_refs[tid] = tr.data_ref
+                if tid not in row_counts:
+                    df = DataStore.get(tr.data_ref)
+                    if df is not None:
+                        row_counts[tid] = len(df)
+
+    trace = {
+        "plan": plan_data,
+        "llm_calls": llm_calls,
+        "tool_names": sources,
+        "data_refs": data_refs,
+        "row_counts": row_counts,
+    }
+
+    payload = {
+        "headline": headline,
+        "explanation": explanation,
+        "key_points": key_points,
+        "notes": notes,
+        "short_answer": short_answer or headline,
         "details_markdown": details_markdown,
         "answer_markdown": ans,
         "tables": tables,
         "charts": charts,
         "plan": plan_data,
-        "assumptions": assumptions,
+        "assumptions": notes if notes else assumptions,
         "warnings": warnings,
         "period": period,
         "sources": sources,
+        "glossary": glossary,
+        "trace": trace,
         "llm_calls": llm_calls,
         "elapsed_ms": elapsed_ms,
         "error": err_obj,
     }
+    if error_code:
+        payload["error_code"] = error_code
+
+    return payload
+
 
 
 # ---------------------------------------------------------------------------
@@ -899,6 +955,27 @@ def _execute_graph_run(
             status="complete",
         )
 
+    except CacheMissError as exc:
+        elapsed_ms = round((time.perf_counter() - t_start) * 1000, 1)
+        payload = format_structured_payload(final_state, elapsed_ms, exc=exc)
+        payload["run_id"] = run_id
+        payload["error_code"] = "not_recorded"
+
+        with _RUNS_LOCK:
+            if run_id in _RUN_STATES:
+                _RUN_STATES[run_id]["status"] = "error"
+                _RUN_STATES[run_id]["payload"] = payload
+                _RUN_STATES[run_id]["error"] = str(exc)
+                _RUN_STATES[run_id]["error_code"] = "not_recorded"
+                _RUN_STATES[run_id]["elapsed_ms"] = elapsed_ms
+
+        update_message(
+            message_id=asst_msg_id,
+            content=payload.get("short_answer") or str(exc),
+            payload=payload,
+            status="error",
+        )
+
     except Exception as exc:
         logger.exception("Background graph execution failed: %s", exc)
         elapsed_ms = round((time.perf_counter() - t_start) * 1000, 1)
@@ -951,7 +1028,14 @@ def chat_endpoint(request: ChatRequest, req: Request):
         result = graph.invoke(state_input, config=config)
         elapsed_ms = round((time.perf_counter() - start_time) * 1000, 1)
         payload = format_structured_payload(result, elapsed_ms)
+        if payload.get("error_code") == "not_recorded":
+            return CleanJSONResponse(status_code=400, content=payload)
         return payload
+    except CacheMissError as exc:
+        elapsed_ms = round((time.perf_counter() - start_time) * 1000, 1)
+        payload = format_structured_payload({}, elapsed_ms, exc=exc)
+        payload["error_code"] = "not_recorded"
+        return CleanJSONResponse(status_code=400, content=payload)
     except BudgetExceeded as exc:
         elapsed_ms = round((time.perf_counter() - start_time) * 1000, 1)
         payload = format_structured_payload({}, elapsed_ms, exc=exc)
@@ -964,6 +1048,7 @@ def chat_endpoint(request: ChatRequest, req: Request):
             return CleanJSONResponse(status_code=429, content=payload)
         payload = format_structured_payload({}, elapsed_ms, exc=exc)
         return CleanJSONResponse(status_code=400, content=payload)
+
 
 
 # ---------------------------------------------------------------------------

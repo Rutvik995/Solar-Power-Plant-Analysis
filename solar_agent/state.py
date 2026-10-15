@@ -393,6 +393,10 @@ class AgentState(TypedDict):
     # Structured answer breakdown fields
     short_answer: Optional[str]
     details_markdown: Optional[str]
+    headline: Optional[str]
+    explanation: Optional[str]
+    key_points: Optional[list[str]]
+    notes: Optional[list[str]]
 
     # Preserved previous user query on this thread for follow-up query inheritance
     previous_query: Optional[str]
