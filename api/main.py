@@ -731,7 +731,11 @@ def format_structured_payload(
     if "tables" in result and isinstance(result["tables"], list) and result["tables"]:
         tables = result["tables"]
     else:
-        tables = build_analysis_tables(result.get("plan"), results_dict)
+        try:
+            tables = build_analysis_tables(result.get("plan"), results_dict)
+        except Exception as t_err:
+            logger.warning("Failed to build analysis tables: %s", t_err)
+            tables = []
 
     # 3. Charts: [plotly_json]
     charts = []
@@ -979,7 +983,18 @@ def _execute_graph_run(
     except Exception as exc:
         logger.exception("Background graph execution failed: %s", exc)
         elapsed_ms = round((time.perf_counter() - t_start) * 1000, 1)
-        payload = format_structured_payload(final_state, elapsed_ms, exc=exc)
+        try:
+            payload = format_structured_payload(final_state, elapsed_ms, exc=exc)
+        except Exception as inner_exc:
+            logger.exception("Failed to build error payload: %s", inner_exc)
+            payload = {
+                "headline": f"**Execution error: {exc}**",
+                "explanation": str(exc),
+                "short_answer": str(exc),
+                "error": {"code": 500, "type": type(exc).__name__, "message": str(exc)},
+                "plan": _format_plan_steps(final_state.get("plan"), final_state.get("results") or {}),
+                "tables": [],
+            }
         payload["run_id"] = run_id
 
         with _RUNS_LOCK:

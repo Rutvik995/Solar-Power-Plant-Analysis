@@ -22,6 +22,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Optional
 
+import numpy as np
 import pandas as pd
 import yaml
 
@@ -153,11 +154,30 @@ def format_column_header(col_name: str, labels: Optional[dict[str, str]] = None)
     return cleaned.capitalize()
 
 
+def is_missing(val: Any) -> bool:
+    """Safely check if a value is None, NaN, or empty without ambiguous truth value on arrays/lists."""
+    if val is None:
+        return True
+    if isinstance(val, (list, tuple, set)):
+        return len(val) == 0
+    if isinstance(val, np.ndarray):
+        return val.size == 0
+    try:
+        res = pd.isna(val)
+        if isinstance(res, (bool, np.bool_)):
+            return bool(res)
+        if hasattr(res, "__iter__"):
+            return bool(res.all())
+    except (ValueError, TypeError):
+        pass
+    return False
+
+
 def format_date_value(val: Any) -> Optional[str]:
     """
     Format a date as '28 Aug 2026'.
     """
-    if val is None or pd.isna(val):
+    if is_missing(val):
         return None
 
     if isinstance(val, (date, datetime)):
@@ -181,7 +201,7 @@ def format_energy_value(val: Any) -> Any:
     Format energy in MWh with thousands separators (kWh if under 1 MWh).
     Input val is assumed in kWh unless already float in MWh.
     """
-    if val is None or pd.isna(val):
+    if is_missing(val):
         return "-"
     try:
         num = float(val)
@@ -201,7 +221,7 @@ def format_pr_value(val: Any) -> Any:
     Format Performance Ratio as a percentage rounded to 1 decimal place.
     E.g., 0.8523 -> '85.2%', 85.23 -> '85.2%'.
     """
-    if val is None or pd.isna(val):
+    if is_missing(val):
         return "-"
     try:
         num = float(val)
@@ -226,14 +246,17 @@ def format_table_cell(val: Any, col_name: str) -> Any:
     - Lists joined with comma
     - No unrounded floats anywhere
     """
-    if val is None or pd.isna(val):
+    # Lists or sets or numpy arrays (e.g. flagged_by)
+    if isinstance(val, (list, tuple, set, np.ndarray)):
+        items = [x for x in val if not is_missing(x)]
+        if not items:
+            return "-"
+        return ", ".join(str(x) for x in items)
+
+    if is_missing(val):
         return "-"
 
     col_lower = str(col_name).lower()
-
-    # Lists or sets (e.g. flagged_by)
-    if isinstance(val, (list, tuple, set)):
-        return ", ".join(str(x) for x in val)
 
     # Date formatting
     if (

@@ -6,7 +6,7 @@ import TopBar from './TopBar';
 import { createSession } from '../../services/api';
 
 export default function AppLayout() {
-  const [mode, setMode] = useState('replay'); // 'replay' | 'live'
+  const [mode, setMode] = useState('live'); // 'live' | 'replay'
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
   const navigate = useNavigate();
   const queryClient = useQueryClient();
