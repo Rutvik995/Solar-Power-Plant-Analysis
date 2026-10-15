@@ -15,7 +15,10 @@ export default function TopBar({
   onToggleSidebar,
 }) {
   const location = useLocation();
-  const pageTitle = TITLES[location.pathname] || 'Solar Intelligence';
+  const pageTitle =
+    location.pathname.startsWith('/chat') || location.pathname === '/'
+      ? 'Chat'
+      : TITLES[location.pathname] || 'Solar Intelligence';
 
   return (
     <header className="h-14 bg-white border-b border-[#E2E8F0] px-6 flex items-center justify-between sticky top-0 z-20">

@@ -1,15 +1,26 @@
 import React, { useState } from 'react';
-import { Outlet } from 'react-router-dom';
+import { Outlet, useNavigate } from 'react-router-dom';
+import { useQueryClient } from '@tanstack/react-query';
 import Sidebar from './Sidebar';
 import TopBar from './TopBar';
+import { createSession } from '../../services/api';
 
 export default function AppLayout() {
   const [mode, setMode] = useState('replay'); // 'replay' | 'live'
-  const [newChatTrigger, setNewChatTrigger] = useState(0);
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
+  const navigate = useNavigate();
+  const queryClient = useQueryClient();
 
-  const handleNewChat = () => {
-    setNewChatTrigger((prev) => prev + 1);
+  const handleNewChat = async () => {
+    try {
+      const newSess = await createSession({ title: 'New Chat' });
+      await queryClient.invalidateQueries({ queryKey: ['sessions'] });
+      localStorage.setItem('solar_last_session_id', newSess.id);
+      navigate(`/chat/${newSess.id}`);
+    } catch (err) {
+      console.error('Failed to create new session:', err);
+      navigate('/');
+    }
   };
 
   const handleToggleSidebar = () => {
@@ -31,7 +42,7 @@ export default function AppLayout() {
           onToggleSidebar={handleToggleSidebar}
         />
         <main className="flex-1 p-6 overflow-y-auto bg-[#F8FAFC]">
-          <Outlet context={{ mode, setMode, newChatTrigger, onNewChat: handleNewChat }} />
+          <Outlet context={{ mode, setMode, onNewChat: handleNewChat }} />
         </main>
       </div>
     </div>

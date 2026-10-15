@@ -23,7 +23,8 @@ export default function App() {
         <Routes>
           <Route path="/" element={<AppLayout />}>
             <Route index element={<ChatPage />} />
-            {/* re-enable later: <Route path="dashboard" element={<DashboardPage />} /> */}
+            <Route path="chat" element={<ChatPage />} />
+            <Route path="chat/:sessionId" element={<ChatPage />} />
             <Route path="about" element={<AboutPage />} />
           </Route>
         </Routes>
