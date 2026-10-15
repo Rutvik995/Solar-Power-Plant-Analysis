@@ -459,3 +459,57 @@ def test_followup_context_from_db_payload(tmp_path, monkeypatch):
     cs.get_chat_engine().dispose()
     cs._CHAT_ENGINE = None
 
+
+def test_auto_title_based_on_question(tmp_path, monkeypatch):
+    """Verify that sessions are automatically titled with intelligent names based on the question."""
+    from api.main import app, generate_chat_title
+    import solar_agent.db.chat_storage as cs
+
+    db_path = tmp_path / "test_title.db"
+    test_db_url = f"sqlite:///{db_path}"
+    monkeypatch.setattr(settings, "chat_database_url", test_db_url)
+    monkeypatch.setattr(settings, "database_url", test_db_url)
+
+    cs._CHAT_ENGINE = None
+    cs.init_chat_db()
+
+    # Unit tests for generate_chat_title
+    assert generate_chat_title("what was rhe PR of plant") == "Plant PR"
+    assert generate_chat_title("What was the PR of Plant 1 in September 2026?") == "Plant 1 PR (Sep 2026)"
+    assert generate_chat_title("show me faulty inverters in block 2") == "Block 2 Faulty Inverters"
+    assert generate_chat_title("what is the soiling loss for plant 2") == "Plant 2 Soiling Loss"
+
+    # API test: create a 'New Chat' session and send question
+    client = TestClient(app)
+    res_sess = client.post("/api/sessions", json={"title": "New Chat"})
+    assert res_sess.status_code == 200
+    session_id = res_sess.json()["id"]
+
+    mock_graph = MagicMock()
+    mock_graph.stream.return_value = iter([
+        {
+            "synthesizer": {
+                "final_answer": "PR is 82%",
+                "short_answer": "PR is 82%",
+                "llm_calls": {"total": 1},
+            }
+        }
+    ])
+
+    with patch("api.main.build_graph", return_value=mock_graph):
+        res = client.post(
+            f"/api/sessions/{session_id}/chat",
+            json={"query": "What was the PR of Plant 1 in September 2026?"},
+        )
+        assert res.status_code == 200
+
+        # Check that session title in list_sessions or get_sessions is now the smart title
+        res_list = client.get("/api/sessions")
+        sessions = res_list.json()
+        target = next(s for s in sessions if s["id"] == session_id)
+        assert target["title"] == "Plant 1 PR (Sep 2026)"
+
+    cs.get_chat_engine().dispose()
+    cs._CHAT_ENGINE = None
+
+

@@ -12,6 +12,7 @@ import {
   stopRun,
   deleteMessagePair,
   editMessage,
+  generateChatTitle,
 } from '../services/api';
 import Skeleton from '../components/common/Skeleton';
 import PlotlyChart from '../components/common/PlotlyChart';
@@ -241,7 +242,8 @@ export default function ChatPage() {
     let currentSessionId = sessionId;
     if (!currentSessionId) {
       try {
-        const newSess = await createSession({ title: q.slice(0, 40) });
+        const smartTitle = generateChatTitle(q);
+        const newSess = await createSession({ title: smartTitle });
         currentSessionId = newSess.id;
         localStorage.setItem('solar_last_session_id', currentSessionId);
         await queryClient.invalidateQueries({ queryKey: ['sessions'] });
@@ -274,6 +276,8 @@ export default function ChatPage() {
 
     try {
       const chatResp = await startSessionChat(currentSessionId, { query: q, mode });
+      // Invalidate sessions immediately so auto-generated title is reflected in sidebar
+      queryClient.invalidateQueries({ queryKey: ['sessions'] });
       const runId = chatResp.run_id;
       setActiveRunId(runId);
       startPolling(runId, currentSessionId);

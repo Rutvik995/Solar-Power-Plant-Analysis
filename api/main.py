@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import re
 import threading
 import time
 import uuid
@@ -969,6 +970,150 @@ def chat_endpoint(request: ChatRequest, req: Request):
 # Sessions & Async Chat Endpoints
 # ---------------------------------------------------------------------------
 
+def generate_chat_title(query: str) -> str:
+    """
+    Intelligently generate a concise, human-readable chat session title
+    based on the question (e.g. 'Plant 1 PR (Sep 2026)', 'Block 2 Faulty Inverters').
+    """
+    if not query or not query.strip():
+        return "New Chat"
+
+    q = query.strip()
+    q_lower = q.lower()
+
+    if q_lower in ("hi", "hello", "hey", "help"):
+        return "New Chat"
+
+    # 1. Detect comparison
+    is_compare = bool(re.search(r"\b(compare|comparison|versus|vs)\b", q_lower))
+
+    # 2. Extract Plants
+    plants = re.findall(r"\bplant\s*([0-9]+|[a-zA-Z]\b)", q_lower)
+    plant_str = None
+    if len(plants) >= 2:
+        plant_str = f"Plant {plants[0].upper()} vs {plants[1].upper()}"
+    elif len(plants) == 1:
+        val = plants[0]
+        plant_str = f"Plant {val.upper()}" if len(val) == 1 and val.isalpha() else f"Plant {val.title()}"
+    elif re.search(r"\bplants?\b", q_lower):
+        plant_str = "Plant"
+
+    # 3. Extract Block
+    block_match = re.search(r"\bblock\s*([0-9]+|[a-zA-Z]\b)", q_lower)
+    block_str = f"Block {block_match.group(1).upper()}" if block_match else None
+
+    # 4. Extract Inverter
+    inv_match = re.search(r"\binverter\s*([0-9]+|[a-zA-Z0-9_-]+)?", q_lower)
+    inv_str = None
+    if inv_match and inv_match.group(1) and inv_match.group(1) not in ("s", "in", "of", "for", "the", "with", "had", "all"):
+        inv_str = f"Inverter {inv_match.group(1).upper()}"
+    elif "inverter" in q_lower:
+        inv_str = "Inverters"
+
+    # 5. Extract Date / Time
+    date_str = None
+    months_str = "january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sep|sept|oct|nov|dec"
+
+    m1 = re.search(r"\b(" + months_str + r")\s+(\d{1,2})(?:st|nd|rd|th)?(?:,?\s*(\d{4}))?\b", q_lower)
+    m2 = re.search(r"\b(\d{1,2})(?:st|nd|rd|th)?\s+(" + months_str + r")(?:,?\s*(\d{4}))?\b", q_lower)
+    m3 = re.search(r"\b(" + months_str + r")(?:\s+(\d{4}))?\b", q_lower)
+
+    if m1:
+        mon = m1.group(1)[:3].title()
+        day = m1.group(2)
+        yr = m1.group(3)
+        date_str = f"{mon} {day}" + (f" {yr}" if yr else "")
+    elif m2:
+        day = m2.group(1)
+        mon = m2.group(2)[:3].title()
+        yr = m2.group(3)
+        date_str = f"{mon} {day}" + (f" {yr}" if yr else "")
+    elif m3:
+        mon = m3.group(1)[:3].title()
+        yr = m3.group(2)
+        date_str = f"{mon} {yr}" if yr else mon
+    elif "today" in q_lower:
+        date_str = "Today"
+    elif "yesterday" in q_lower:
+        date_str = "Yesterday"
+    elif "last month" in q_lower:
+        date_str = "Last Month"
+    elif "last week" in q_lower:
+        date_str = "Last Week"
+
+    # 6. Topic detection
+    topic = None
+    if re.search(r"\b(pr|performance\s*ratio)\b", q_lower):
+        topic = "PR"
+    elif re.search(r"\bsoiling\s*loss\b", q_lower):
+        topic = "Soiling Loss"
+    elif re.search(r"\b(soiling|dust|cleaning|clean)\b", q_lower):
+        topic = "Soiling & Cleaning" if "clean" in q_lower else "Soiling"
+    elif re.search(r"\b(zero[-\s]*gen|zero[-\s]*generation|offline|outage)\b", q_lower):
+        topic = "Zero-Gen"
+    elif re.search(r"\b(trip|tripped)\b", q_lower):
+        topic = "Trip"
+    elif re.search(r"\b(fault|faulty|alarm|breakdown|fail|failure|error)\b", q_lower):
+        topic = "Faults"
+    elif re.search(r"\b(underperform|underperforming|underperformance|derating|low\s+gen)\b", q_lower):
+        topic = "Underperforming"
+    elif re.search(r"\b(yield|generation|energy|kwh|mwh)\b", q_lower):
+        topic = "Yield"
+    elif re.search(r"\b(irradiance|ghi|poa|weather|temperature)\b", q_lower):
+        topic = "Irradiance"
+    elif re.search(r"\bstatus\b", q_lower):
+        topic = "Status"
+
+    parts = []
+    if plant_str:
+        parts.append(plant_str)
+    if block_str:
+        parts.append(block_str)
+    if inv_str:
+        if inv_str == "Inverters" and topic == "Faults":
+            parts.append("Faulty Inverters")
+            topic = None
+        elif inv_str == "Inverters" and topic == "Zero-Gen":
+            parts.append("Zero-Gen Inverters")
+            topic = None
+        else:
+            parts.append(inv_str)
+
+    if topic and topic not in parts:
+        parts.append(topic)
+    if is_compare and "vs" not in " ".join(parts):
+        parts.append("Comparison")
+    if date_str:
+        parts.append(f"({date_str})")
+
+    if parts:
+        candidate = " ".join(parts)
+        if len(candidate) <= 35:
+            return candidate
+        parts_no_date = [p for p in parts if not p.startswith("(")]
+        candidate_short = " ".join(parts_no_date)
+        if len(candidate_short) <= 35:
+            return candidate_short
+
+    # Fallback to cleaning conversational query phrasing
+    clean = re.sub(
+        r"^(what\s+(is|was|were|are|rhe|the)\s+|show\s+(me\s+)?(all\s+)?|tell\s+me\s+(about\s+)?|can\s+you\s+(explain\s+)?|explain\s+(how\s+)?|give\s+me\s+|how\s+(much|many|is|are|does\s+the\s+system\s+|do\s+we\s+)\s*|why\s+(did|is|are)\s+|please\s+|find\s+(all\s+)?|calculate\s+|check\s+|which\s+|list\s+(all\s+)?)",
+        "",
+        q,
+        flags=re.I,
+    ).strip()
+    clean = re.sub(r"^(the|a|an|all|any)\s+", "", clean, flags=re.I).strip()
+    clean = re.sub(r"[?!.,;:]+$", "", clean).strip()
+
+    if clean:
+        words = clean.split()[:5]
+        acronyms = {"pr", "ghi", "poa", "dc", "ac", "kwh", "mwh"}
+        res = " ".join(w.upper() if w.lower() in acronyms else w.capitalize() for w in words)
+        return res[:35]
+
+    return "Chat Session"
+
+
 class CreateSessionRequest(BaseModel):
     title: Optional[str] = "New Chat"
 
@@ -1048,12 +1193,12 @@ def session_chat_endpoint(session_id: str, request: SessionChatRequest, req: Req
 
     q_text = request.query.strip()
 
-    # Auto-title session from the first question (first 40 characters, no LLM call)
+    # Auto-title session from the first question based on question content
     existing_msgs = list_messages(session_id)
     if not existing_msgs or sess.get("title") in ("New Chat", "", None):
-        first_q = q_text[:40]
-        if first_q:
-            update_session(session_id, title=first_q)
+        smart_title = generate_chat_title(q_text)
+        if smart_title:
+            update_session(session_id, title=smart_title)
 
     # Follow-up context is built from the last completed assistant payload in DB, not checkpointer
     prev_query, prev_tasks, prev_scope = get_last_completed_assistant_context(session_id)
@@ -1205,9 +1350,9 @@ def edit_message_endpoint(message_id: str, request: EditMessageRequest, req: Req
     # 3. Check for auto-titling if this is the first message
     all_msgs = list_messages(session_id)
     if len(all_msgs) <= 1:
-        first_q = new_query[:40]
-        if first_q:
-            update_session(session_id, title=first_q)
+        smart_title = generate_chat_title(new_query)
+        if smart_title:
+            update_session(session_id, title=smart_title)
 
     # 4. Follow-up context from the last completed assistant message prior to this message
     prev_query, prev_tasks, prev_scope = get_last_completed_assistant_context(
