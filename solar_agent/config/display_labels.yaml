@@ -53,3 +53,23 @@ cell_temp_c: "Cell temperature (°C)"
 ambient_temp_c: "Ambient temperature (°C)"
 module_temperature: "Module temperature (°C)"
 ambient_temperature: "Ambient temperature (°C)"
+
+# Friendly tool mappings
+detect_zero_generation_tool: "Zero-generation check"
+detect_zero_generation: "Zero-generation check"
+detect_anomalies_tool: "Unusual-reading check"
+detect_anomalies: "Unusual-reading check"
+detect_status_faults_tool: "Status fault check"
+detect_status_faults: "Status fault check"
+detect_peer_underperformance_tool: "Peer underperformance check"
+detect_peer_underperformance: "Peer underperformance check"
+
+problem_found: "Problem found"
+actual_vs_peers: "Actual vs peers"
+
+capacity_mwp: "Capacity (MWp)"
+area_acres: "Area (acres)"
+block_count: "Blocks"
+inverter_count: "Inverters"
+total_rated_dc_kw: "Total rated DC (kW)"
+total_rated_ac_kw: "Total rated AC (kW)"

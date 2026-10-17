@@ -44,13 +44,6 @@ const EXAMPLE_QUESTIONS = [
   'Are there any zero-generation events under high irradiance?',
 ];
 
-const DEFAULT_FOLLOW_UPS = [
-  'Same for Plant 2',
-  'Show as chart',
-  'Find faulty inverters',
-  'Compare with Plant 3',
-];
-
 const isNumericValue = (val) => {
   if (typeof val === 'number') return true;
   if (typeof val === 'string') {
@@ -70,7 +63,9 @@ const isMainColumn = (col) => {
     c.includes('energy produced') ||
     c.includes('yield') ||
     c.includes('soiling loss') ||
-    c.includes('loss (%)')
+    c.includes('loss (%)') ||
+    c.includes('capacity (mwp)') ||
+    c.includes('rated dc')
   );
 };
 
@@ -93,6 +88,7 @@ export default function ChatPage() {
   const [isPanelOpen, setIsPanelOpen] = useState(true);
   const [isTechDetailsOpen, setIsTechDetailsOpen] = useState(false);
   const [generalError, setGeneralError] = useState(null);
+  const [expandedBlocks, setExpandedBlocks] = useState({});
 
   // Edit and delete state
   const [editingMessageId, setEditingMessageId] = useState(null);
@@ -594,7 +590,7 @@ export default function ChatPage() {
               return (
                 <div
                   key={msg.id || idx}
-                  className="bg-white border border-[#E2E8F0] rounded-xl p-4 shadow-none space-y-3.5 max-w-full"
+                  className="bg-white border border-[#E2E8F0] rounded-xl p-4 shadow-none space-y-3.5 w-full max-w-full min-w-0 overflow-hidden"
                 >
                   {isWorking ? (
                     /* Working Card with Live Plan Steps & Skeletons */
@@ -726,65 +722,145 @@ export default function ChatPage() {
                           </p>
                         )}
 
-                        {/* 3. the table(s): grey header, right-aligned numbers with tabular-nums, hover row, main number column in bold, wide tables scroll inside card */}
-                        {payload.tables && payload.tables.length > 0 && (
-                          <div className="space-y-3">
-                            {payload.tables.map((table, tIdx) => {
-                              const mainColIdx = table.columns.findIndex((c) => isMainColumn(c));
+                        {/* 3. the table(s): grey header, right-aligned numbers with tabular-nums, hover row, main number column in bold, wide tables stay in card with scroll fallback */}
+                        {payload.tables && payload.tables.length > 0 && (() => {
+                          const isOverview =
+                            payload.intent === 'overview' ||
+                            payload.tables.some(
+                              (t) => t.type === 'blocks' || (t.title && t.title.toLowerCase().includes('block'))
+                            );
 
-                              return (
-                                <div
-                                  key={tIdx}
-                                  className="border border-[#E2E8F0] rounded-lg overflow-hidden bg-white shadow-sm"
-                                >
-                                  {table.title && (
-                                    <div className="px-3.5 py-2 bg-[#F8FAFC] border-b border-[#E2E8F0] text-xs font-semibold text-[#0F172A]">
-                                      {table.title}
-                                    </div>
-                                  )}
-                                  <div className="overflow-x-auto max-w-full">
-                                    <table className="w-full border-collapse text-xs">
-                                      <thead className="bg-[#F1F5F9] border-b border-[#E2E8F0] text-[#475569]">
-                                        <tr>
-                                          {table.columns.map((col, cIdx) => (
-                                            <th
-                                              key={cIdx}
-                                              className="px-3.5 py-2.5 text-left font-semibold whitespace-nowrap text-[#475569]"
-                                            >
-                                              <GlossaryText text={col} glossary={payload.glossary} />
-                                            </th>
-                                          ))}
-                                        </tr>
-                                      </thead>
-                                      <tbody className="divide-y divide-[#E2E8F0]">
-                                        {table.rows.map((row, rIdx) => (
-                                          <tr key={rIdx} className="hover:bg-[#F8FAFC] transition-colors">
-                                            {row.map((val, vIdx) => {
-                                              const isNum = isNumericValue(val);
-                                              const isMain = vIdx === mainColIdx;
-                                              return (
-                                                <td
-                                                  key={vIdx}
-                                                  className={`px-3.5 py-2.5 ${
-                                                    isNum
-                                                      ? 'text-right font-mono tabular-nums text-[#0F172A]'
-                                                      : 'text-left text-[#0F172A]'
-                                                  } ${isMain ? 'font-bold' : ''} whitespace-nowrap`}
-                                                >
-                                                  {val !== null && val !== undefined ? String(val) : '—'}
-                                                </td>
-                                              );
-                                            })}
-                                          </tr>
-                                        ))}
-                                      </tbody>
-                                    </table>
+                          const renderSingleTable = (table, key) => {
+                            const mainColIdx = table.columns?.findIndex((c) => isMainColumn(c));
+                            return (
+                              <div
+                                key={key}
+                                className="border border-[#E2E8F0] rounded-lg overflow-hidden bg-white shadow-sm w-full max-w-full min-w-0"
+                              >
+                                {table.title && (
+                                  <div className="px-3.5 py-2 bg-[#F8FAFC] border-b border-[#E2E8F0] text-xs font-semibold text-[#0F172A] flex items-center justify-between">
+                                    <span>{table.title}</span>
+                                    {table.rows && (
+                                      <span className="text-[11px] font-normal text-[#64748B]">
+                                        {table.rows.length} {table.rows.length === 1 ? 'row' : 'rows'}
+                                      </span>
+                                    )}
                                   </div>
+                                )}
+                                <div className="overflow-x-auto max-w-full">
+                                  <table className="w-full border-collapse text-xs">
+                                    <thead className="bg-[#F1F5F9] border-b border-[#E2E8F0] text-[#475569]">
+                                      <tr>
+                                        {table.columns.map((col, cIdx) => (
+                                          <th
+                                            key={cIdx}
+                                            className="px-3.5 py-2.5 text-left font-semibold whitespace-nowrap text-[#475569]"
+                                          >
+                                            <GlossaryText text={col} glossary={payload.glossary} />
+                                          </th>
+                                        ))}
+                                      </tr>
+                                    </thead>
+                                    <tbody className="divide-y divide-[#E2E8F0]">
+                                      {table.rows.map((row, rIdx) => (
+                                        <tr key={rIdx} className="hover:bg-[#F8FAFC] transition-colors">
+                                          {row.map((val, vIdx) => {
+                                            const isNum = isNumericValue(val);
+                                            const isMain = vIdx === mainColIdx;
+                                            return (
+                                              <td
+                                                key={vIdx}
+                                                className={`px-3.5 py-2.5 ${
+                                                  isNum
+                                                    ? 'text-right font-mono tabular-nums text-[#0F172A]'
+                                                    : 'text-left text-[#0F172A]'
+                                                } ${isMain ? 'font-bold' : ''} whitespace-nowrap`}
+                                              >
+                                                {val !== null && val !== undefined ? String(val) : '—'}
+                                              </td>
+                                            );
+                                          })}
+                                        </tr>
+                                      ))}
+                                    </tbody>
+                                  </table>
                                 </div>
-                              );
-                            })}
-                          </div>
-                        )}
+                                {table.notes && table.notes.length > 0 && (
+                                  <div className="px-3.5 py-1.5 bg-[#F8FAFC] border-t border-[#E2E8F0] text-[11px] text-[#64748B]">
+                                    {table.notes.join(' ')}
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          };
+
+                          if (isOverview) {
+                            const plantsTable = payload.tables.find(
+                              (t) => t.type === 'plants' || (t.title && t.title.toLowerCase().includes('plant'))
+                            );
+                            const blocksTable = payload.tables.find(
+                              (t) => t.type === 'blocks' || (t.title && t.title.toLowerCase().includes('block'))
+                            );
+                            const otherTables = payload.tables.filter(
+                              (t) => t !== plantsTable && t !== blocksTable
+                            );
+                            const blockCount = blocksTable?.rows?.length || 0;
+                            const isBlocksOpen = Boolean(expandedBlocks[msg.id]);
+
+                            return (
+                              <div className="space-y-3 max-w-full min-w-0">
+                                {/* 1. Plants table shown first */}
+                                {plantsTable && renderSingleTable(plantsTable, 'plants')}
+
+                                {/* 2. Blocks table in a collapsed "Show blocks (N)" section */}
+                                {blocksTable && (
+                                  <div className="border border-[#E2E8F0] rounded-lg overflow-hidden bg-white shadow-sm w-full max-w-full min-w-0">
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setExpandedBlocks((prev) => ({
+                                          ...prev,
+                                          [msg.id]: !prev[msg.id],
+                                        }));
+                                      }}
+                                      className="w-full px-3.5 py-2.5 bg-[#F8FAFC] hover:bg-[#F1F5F9] transition-colors flex items-center justify-between text-xs font-semibold text-[#0F172A]"
+                                    >
+                                      <span className="flex items-center gap-1.5">
+                                        <ChevronDown
+                                          className={`w-3.5 h-3.5 text-[#64748B] transition-transform duration-200 ${
+                                            isBlocksOpen ? 'rotate-180' : ''
+                                          }`}
+                                        />
+                                        <span>
+                                          {isBlocksOpen
+                                            ? `Hide blocks (${blockCount})`
+                                            : `Show blocks (${blockCount})`}
+                                        </span>
+                                      </span>
+                                      <span className="text-[11px] font-normal text-[#64748B]">
+                                        {isBlocksOpen ? 'Click to collapse' : 'Click to expand'}
+                                      </span>
+                                    </button>
+                                    {isBlocksOpen && (
+                                      <div className="border-t border-[#E2E8F0]">
+                                        {renderSingleTable(blocksTable, 'blocks')}
+                                      </div>
+                                    )}
+                                  </div>
+                                )}
+
+                                {/* Any other analysis tables */}
+                                {otherTables.map((t, oIdx) => renderSingleTable(t, `other-${oIdx}`))}
+                              </div>
+                            );
+                          }
+
+                          return (
+                            <div className="space-y-3 max-w-full min-w-0">
+                              {payload.tables.map((table, tIdx) => renderSingleTable(table, tIdx))}
+                            </div>
+                          );
+                        })()}
 
                         {/* Plotly Charts if present */}
                         {payload.charts && payload.charts.length > 0 && (
@@ -839,20 +915,24 @@ export default function ChatPage() {
                           </div>
                         )}
 
-                        {/* Follow-up question chips */}
-                        <div className="pt-2 flex flex-wrap items-center gap-1.5 border-t border-[#E2E8F0]">
-                          <span className="text-xs text-[#64748B] font-medium mr-1">Follow up:</span>
-                          {DEFAULT_FOLLOW_UPS.map((chip, fIdx) => (
-                            <button
-                              key={fIdx}
-                              type="button"
-                              onClick={() => handleSubmit(chip)}
-                              className="text-xs px-2.5 py-1 rounded-lg bg-[#F8FAFC] hover:bg-[#EFF6FF] border border-[#E2E8F0] hover:border-[#2563EB] text-[#0F172A] hover:text-[#2563EB] transition-colors"
-                            >
-                              {chip}
-                            </button>
-                          ))}
-                        </div>
+                        {/* Clickable suggestion chips from response (replaces static chips) */}
+                        {payload.suggestions && payload.suggestions.length > 0 && (
+                          <div className="pt-2 flex flex-wrap items-center gap-1.5 border-t border-[#E2E8F0]">
+                            <span className="text-xs text-[#64748B] font-medium mr-1">
+                              {payload.is_out_of_scope ? 'Suggested:' : 'Follow up:'}
+                            </span>
+                            {payload.suggestions.map((chip, fIdx) => (
+                              <button
+                                key={fIdx}
+                                type="button"
+                                onClick={() => handleSubmit(chip)}
+                                className="text-xs px-2.5 py-1 rounded-lg bg-[#F8FAFC] hover:bg-[#EFF6FF] border border-[#E2E8F0] hover:border-[#2563EB] text-[#0F172A] hover:text-[#2563EB] transition-colors"
+                              >
+                                {chip}
+                              </button>
+                            ))}
+                          </div>
+                        )}
 
                         {/* 7. Footer line with period, inspect trace, time */}
                         <div className="pt-2 flex flex-wrap items-center justify-between gap-2 text-xs text-[#64748B] border-t border-[#E2E8F0]">

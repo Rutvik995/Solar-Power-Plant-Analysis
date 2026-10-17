@@ -246,17 +246,38 @@ def format_table_cell(val: Any, col_name: str) -> Any:
     - Lists joined with comma
     - No unrounded floats anywhere
     """
-    # Lists or sets or numpy arrays (e.g. flagged_by)
+    # Lists or sets or numpy arrays (e.g. flagged_by / problem_found)
     if isinstance(val, (list, tuple, set, np.ndarray)):
-        items = [x for x in val if not is_missing(x)]
-        if not items:
+        labels = load_display_labels()
+        formatted_items = []
+        for x in val:
+            if not is_missing(x):
+                x_str = str(x)
+                clean_label = labels.get(x_str) or labels.get(x_str.replace("_tool", "")) or x_str.replace("_", " ").capitalize()
+                formatted_items.append(clean_label)
+        if not formatted_items:
             return "-"
-        return ", ".join(str(x) for x in items)
+        return ", ".join(formatted_items)
 
     if is_missing(val):
         return "-"
 
     col_lower = str(col_name).lower()
+
+    # Capacity MWp formatting
+    if col_lower in ("capacity_mwp", "capacity (mwp)"):
+        try:
+            return f"{float(val):.2f} MWp"
+        except (ValueError, TypeError):
+            return str(val)
+
+    # Area acres formatting
+    if col_lower in ("area_acres", "area (acres)"):
+        try:
+            num = float(val)
+            return f"{int(num):,} acres" if num == int(num) else f"{num:,.1f} acres"
+        except (ValueError, TypeError):
+            return str(val)
 
     # Date formatting
     if (
@@ -448,16 +469,61 @@ def build_analysis_tables(
         for t in plan_obj.tasks:
             task_agent_map[t.id] = getattr(t, "agent", "unknown")
 
+    # 0. Overview Tables (Plants first, Blocks second)
+    for tid, tr in results_dict.items():
+        if not tr or getattr(tr, "status", None) != TaskStatus.DONE:
+            continue
+        metrics = getattr(tr, "metrics", {}) or {}
+        plants_data = metrics.get("plants")
+        blocks_data = metrics.get("blocks")
+        if plants_data and isinstance(plants_data, list):
+            raw_cols = ["plant_name", "capacity_mwp", "area_acres", "block_count", "inverter_count"]
+            friendly_cols = [format_column_header(c, labels) for c in raw_cols]
+            p_rows = []
+            for p in plants_data[:50]:
+                p_rows.append([
+                    format_table_cell(p.get("plant_name", f"Plant {p.get('plant_id', '')}"), "plant_name"),
+                    format_table_cell(p.get("capacity_mwp"), "capacity_mwp"),
+                    format_table_cell(p.get("area_acres"), "area_acres"),
+                    format_table_cell(p.get("block_count"), "block_count"),
+                    format_table_cell(p.get("inverter_count"), "inverter_count"),
+                ])
+            if p_rows:
+                tables.append({
+                    "type": "plants",
+                    "title": "Solar Plants Overview",
+                    "columns": friendly_cols,
+                    "rows": p_rows,
+                })
+        if blocks_data and isinstance(blocks_data, list):
+            raw_cols = ["plant_name", "block_name", "inverter_count", "rated_dc_kw"]
+            friendly_cols = [format_column_header(c, labels) for c in raw_cols]
+            b_rows = []
+            for b in blocks_data[:50]:
+                b_rows.append([
+                    format_table_cell(b.get("plant_name", ""), "plant_name"),
+                    format_table_cell(b.get("block_name", ""), "block_name"),
+                    format_table_cell(b.get("inverter_count"), "inverter_count"),
+                    format_table_cell(b.get("rated_dc_kw"), "rated_dc_kw"),
+                ])
+            if b_rows:
+                tables.append({
+                    "type": "blocks",
+                    "title": "Solar Blocks Overview",
+                    "columns": friendly_cols,
+                    "rows": b_rows,
+                })
+
     for tid, tr in results_dict.items():
         if not tr or getattr(tr, "status", None) != TaskStatus.DONE:
             continue
 
         agent = task_agent_map.get(tid, "")
-        # CRITICAL: A data-fetch task never produces a table!
+        # A standard telemetry data-fetch task never produces a table
         if agent == "data" or agent == "orchestrator":
             continue
 
-        # 1. Fault Agent Table
+        # 1. Fault Agent Table (5 columns max)
         if agent == "fault":
             flagged = (tr.metrics or {}).get("flagged_items") or []
             if not flagged and tr.data_ref:
@@ -467,11 +533,20 @@ def build_analysis_tables(
 
             if flagged:
                 grouped: dict[tuple[str, str], dict[str, Any]] = {}
+                peer_irradiances: list[float] = []
+
                 for item in flagged:
                     inv_id = str(item.get("inverter_id", item.get("inverter", "")))
                     raw_date = str(item.get("date", item.get("log_date", "")))
                     key = (inv_id, raw_date)
                     flag_tool = item.get("flagging_tool") or item.get("type") or "Fault"
+
+                    peer_irr = item.get("peer_irradiance")
+                    if peer_irr is not None and not is_missing(peer_irr):
+                        try:
+                            peer_irradiances.append(float(peer_irr))
+                        except (ValueError, TypeError):
+                            pass
 
                     if key not in grouped:
                         grouped[key] = {
@@ -481,37 +556,53 @@ def build_analysis_tables(
                             "flagged_by": [flag_tool],
                             "pr": item.get("pr", item.get("performance_ratio")),
                             "peer_pr": item.get("peer_pr"),
-                            "peer_irradiance": item.get("peer_irradiance"),
                         }
                     else:
                         if flag_tool not in grouped[key]["flagged_by"]:
                             grouped[key]["flagged_by"].append(flag_tool)
 
-                raw_cols = ["inverter_id", "block", "date", "flagged_by", "pr", "peer_pr", "peer_irradiance"]
-                friendly_cols = [format_column_header(c, labels) for c in raw_cols]
-
+                columns = ["Inverter", "Block", "Date", "Problem found", "Actual vs peers"]
                 rows: list[list[Any]] = []
                 for g in list(grouped.values())[:50]:
+                    pr_val = g.get("pr")
+                    peer_pr_val = g.get("peer_pr")
+                    if not is_missing(pr_val) and not is_missing(peer_pr_val):
+                        actual_vs_peers = f"{format_pr_value(pr_val)} vs {format_pr_value(peer_pr_val)}"
+                    elif not is_missing(pr_val):
+                        actual_vs_peers = format_pr_value(pr_val)
+                    else:
+                        actual_vs_peers = "-"
+
                     row = [
                         format_table_cell(g["inverter_id"], "inverter_id"),
                         format_table_cell(g["block"], "block"),
                         format_table_cell(g["date"], "date"),
                         format_table_cell(g["flagged_by"], "flagged_by"),
-                        format_table_cell(g["pr"], "pr"),
-                        format_table_cell(g["peer_pr"], "peer_pr"),
-                        format_table_cell(g["peer_irradiance"], "peer_irradiance"),
+                        actual_vs_peers,
                     ]
                     rows.append(row)
 
                 if rows:
-                    tables.append({
+                    peer_note = None
+                    if peer_irradiances:
+                        avg_irr = sum(peer_irradiances) / len(peer_irradiances)
+                        peer_note = f"Peer irradiance during flagged events averaged {avg_irr:.2f} kWh/m²."
+                        if hasattr(tr, "metrics") and isinstance(tr.metrics, dict):
+                            tr.metrics["peer_irradiance_note"] = peer_note
+
+                    tbl_entry = {
+                        "type": "faults",
                         "title": "Flagged Inverters Analysis",
-                        "columns": friendly_cols,
+                        "columns": columns,
                         "rows": rows,
-                    })
+                    }
+                    if peer_note:
+                        tbl_entry["notes"] = [peer_note]
+                        tbl_entry["note"] = peer_note
+                    tables.append(tbl_entry)
                 continue
 
-        # 2. Environment Agent Table (Soiling)
+        # 2. Environment Agent Table (Soiling, 5 columns max)
         if agent == "environment":
             metrics = tr.metrics or {}
             pids = sorted(list({
@@ -523,7 +614,6 @@ def build_analysis_tables(
                 raw_cols = [
                     "plant_name",
                     "cleaning_events",
-                    "soiling_ratio_min",
                     "soiling_ratio_avg",
                     "soiling_loss_pct",
                     "soiling_loss_kwh",
@@ -535,7 +625,6 @@ def build_analysis_tables(
                     row = [
                         f"Plant {pid}",
                         format_table_cell(metrics.get(f"plant_{pid}_cleaning_events", 0), "cleaning_events"),
-                        format_table_cell(metrics.get(f"plant_{pid}_soiling_ratio_min"), "soiling_ratio_min"),
                         format_table_cell(metrics.get(f"plant_{pid}_soiling_ratio_avg"), "soiling_ratio_avg"),
                         format_table_cell(metrics.get(f"plant_{pid}_soiling_loss_pct", 0), "soiling_loss_pct"),
                         format_table_cell(metrics.get(f"plant_{pid}_soiling_loss_kwh", 0), "soiling_loss_kwh"),
@@ -544,18 +633,31 @@ def build_analysis_tables(
 
                 if rows:
                     tables.append({
+                        "type": "environment",
                         "title": "Soiling Analysis by Plant",
                         "columns": friendly_cols,
                         "rows": rows,
                     })
                 continue
 
-        # 3. Performance Agent (or other analysis agent with DataFrame in data_ref)
+        # 3. Performance Agent (or other analysis agent with DataFrame in data_ref, 5 columns max)
         if tr.data_ref:
             df = DataStore.get(tr.data_ref)
             if df is not None and not df.empty:
                 df_sample = df.head(50).copy()
                 raw_cols = list(df_sample.columns)
+
+                # Strictly cap at 5 columns max from the backend
+                if len(raw_cols) > 5:
+                    priority = [
+                        "plant_name", "plant_id", "inverter_id", "block_name", "block", "log_date", "date",
+                        "total_daily_yield_kwh", "yield_kwh", "energy_produced",
+                        "performance_ratio", "pr", "specific_yield_kwh_kwp", "capacity_factor",
+                    ]
+                    selected = [c for c in priority if c in raw_cols]
+                    remaining = [c for c in raw_cols if c not in selected]
+                    raw_cols = (selected + remaining)[:5]
+
                 friendly_cols = [format_column_header(c, labels) for c in raw_cols]
 
                 rows = []
@@ -569,6 +671,7 @@ def build_analysis_tables(
                 if rows:
                     title = "Performance Analysis" if agent == "performance" else "Analysis Results"
                     tables.append({
+                        "type": "performance" if agent == "performance" else "analysis",
                         "title": title,
                         "columns": friendly_cols,
                         "rows": rows,

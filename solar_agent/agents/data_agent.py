@@ -57,6 +57,36 @@ class DataAgent:
         tool_calls_made: list[str] = []
 
         try:
+            if inputs.get("tool") == "get_plant_overview" or "level" in inputs:
+                from solar_agent.tools.data_tools import get_plant_overview
+                plant_ids = inputs.get("plant_ids")
+                level = inputs.get("level", "plants")
+                include_blocks = inputs.get("include_blocks", False)
+                overview_res = get_plant_overview(plant_ids=plant_ids, level=level)
+                tool_calls_made.append("get_plant_overview")
+                metrics = dict(overview_res.get("metrics") or {})
+                if "plants" in overview_res:
+                    metrics["plants"] = overview_res["plants"]
+                if "blocks" in overview_res:
+                    metrics["blocks"] = overview_res["blocks"]
+                if "inverters" in overview_res:
+                    metrics["inverters"] = overview_res["inverters"]
+                if "data_coverage" in overview_res:
+                    metrics["data_coverage"] = overview_res["data_coverage"]
+
+                if include_blocks and level == "plants":
+                    blocks_res = get_plant_overview(plant_ids=plant_ids, level="blocks")
+                    metrics["blocks"] = blocks_res["blocks"]
+
+                return TaskResult(
+                    task_id=task_id,
+                    status=TaskStatus.DONE,
+                    summary=overview_res.get("summary") or "Retrieved structural overview of solar plants.",
+                    data_ref=overview_res.get("data_ref"),
+                    metrics=metrics,
+                    tool_calls_made=tool_calls_made,
+                )
+
             plant_ids   = inputs.get("plant_ids") or []
             block_ids   = inputs.get("block_ids") or []
             inverter_ids = inputs.get("inverter_ids") or []

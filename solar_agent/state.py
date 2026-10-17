@@ -36,6 +36,7 @@ class AgentName(str, Enum):
 
 
 class IntentType(str, Enum):
+    OVERVIEW = "overview"
     PERFORMANCE_RANKING = "performance_ranking"
     FAULT_DIAGNOSIS = "fault_diagnosis"
     COMPARISON = "comparison"

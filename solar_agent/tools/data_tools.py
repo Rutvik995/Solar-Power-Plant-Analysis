@@ -768,3 +768,176 @@ def fetch_weather_daily_tool(
         },
         "empty": df.empty,
     }
+
+
+# ---------------------------------------------------------------------------
+# 7. get_plant_overview
+# ---------------------------------------------------------------------------
+
+from typing import Literal
+
+class GetPlantOverviewSchema(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    plant_ids: Optional[list[int]] = None
+    level: Literal["plants", "blocks", "inverters"] = "plants"
+
+
+def get_plant_overview(
+    plant_ids: Optional[list[int]] = None,
+    level: str = "plants",
+) -> dict[str, Any]:
+    """
+    Returns plant, block, or inverter structural overview and data coverage
+    without joining telemetry.
+    """
+    from sqlalchemy import text
+    from solar_agent.db.connection import get_sync_engine
+    from solar_agent.graph.data_store import DataStore
+
+    engine = get_sync_engine()
+    with engine.connect() as conn:
+        cov = conn.execute(text(
+            "SELECT MIN(log_date) as min_date, MAX(log_date) as max_date FROM daily_inverter_telemetry"
+        )).fetchone()
+        data_coverage = {
+            "min_date": str(cov.min_date) if cov and cov.min_date else None,
+            "max_date": str(cov.max_date) if cov and cov.max_date else None,
+            "start_date": str(cov.min_date) if cov and cov.min_date else None,
+            "end_date": str(cov.max_date) if cov and cov.max_date else None,
+        }
+
+        p_filter = ""
+        params: dict[str, Any] = {}
+        if plant_ids:
+            p_filter = "WHERE p.plant_id = ANY(:plant_ids)"
+            params["plant_ids"] = list(plant_ids)
+
+        if level == "plants":
+            sql = f"""
+            SELECT
+                p.plant_id,
+                p.plant_name,
+                CAST(p.capacity_mwp AS FLOAT) AS capacity_mwp,
+                CAST(p.area_acres AS FLOAT) AS area_acres,
+                CAST((SELECT COUNT(*) FROM blocks b WHERE b.plant_id = p.plant_id) AS INT) AS block_count,
+                CAST((SELECT COUNT(*) FROM inverters i WHERE i.plant_id = p.plant_id) AS INT) AS inverter_count,
+                CAST((SELECT COALESCE(SUM(i.rated_dc_kw), 0) FROM inverters i WHERE i.plant_id = p.plant_id) AS FLOAT) AS total_rated_dc_kw,
+                CAST((SELECT COALESCE(SUM(i.rated_ac_kw), 0) FROM inverters i WHERE i.plant_id = p.plant_id) AS FLOAT) AS total_rated_ac_kw
+            FROM plants p
+            {p_filter}
+            ORDER BY p.plant_id
+            """
+            df = pd.read_sql_query(text(sql), conn, params=params if params else None)
+            plants_list = df.to_dict(orient="records")
+            data_ref = DataStore.store(df)
+            metrics = {
+                "total_plants": len(df),
+                "total_blocks": int(df["block_count"].sum()) if not df.empty else 0,
+                "total_inverters": int(df["inverter_count"].sum()) if not df.empty else 0,
+                "combined_capacity_mwp": round(float(df["capacity_mwp"].sum()), 2) if not df.empty else 0.0,
+                "total_rated_dc_kw": round(float(df["total_rated_dc_kw"].sum()), 2) if not df.empty else 0.0,
+                "total_rated_ac_kw": round(float(df["total_rated_ac_kw"].sum()), 2) if not df.empty else 0.0,
+            }
+            return {
+                "level": "plants",
+                "plants": plants_list,
+                "data": plants_list,
+                "data_ref": data_ref,
+                "total_count": len(df),
+                "total_plants": metrics["total_plants"],
+                "total_blocks": metrics["total_blocks"],
+                "total_inverters": metrics["total_inverters"],
+                "combined_capacity_mwp": metrics["combined_capacity_mwp"],
+                "total_capacity_mwp": metrics["combined_capacity_mwp"],
+                "data_coverage": data_coverage,
+                "metrics": metrics,
+                "summary": f"Retrieved structural overview for {len(df)} solar plants (total {metrics['combined_capacity_mwp']} MWp).",
+            }
+
+        elif level == "blocks":
+            b_filter = "WHERE b.plant_id = ANY(:plant_ids)" if plant_ids else ""
+            sql = f"""
+            SELECT
+                p.plant_name,
+                b.block_name,
+                CAST(COUNT(i.inverter_id) AS INT) AS inverter_count,
+                CAST(COALESCE(SUM(i.rated_dc_kw), 0) AS FLOAT) AS rated_dc_kw
+            FROM blocks b
+            JOIN plants p ON b.plant_id = p.plant_id
+            LEFT JOIN inverters i ON b.block_id = i.block_id
+            {b_filter}
+            GROUP BY p.plant_id, p.plant_name, b.block_id, b.block_name
+            ORDER BY p.plant_id, b.block_id
+            """
+            df = pd.read_sql_query(text(sql), conn, params=params if params else None)
+            blocks_list = df.to_dict(orient="records")
+            data_ref = DataStore.store(df)
+            metrics = {
+                "total_blocks": len(df),
+                "total_inverters": int(df["inverter_count"].sum()) if not df.empty else 0,
+                "total_rated_dc_kw": round(float(df["rated_dc_kw"].sum()), 2) if not df.empty else 0.0,
+            }
+            return {
+                "level": "blocks",
+                "blocks": blocks_list,
+                "data": blocks_list,
+                "data_ref": data_ref,
+                "total_count": len(df),
+                "data_coverage": data_coverage,
+                "metrics": metrics,
+                "summary": f"Retrieved {len(df)} blocks across {len(plant_ids) if plant_ids else 'all'} plants.",
+            }
+
+        elif level == "inverters":
+            i_filter = "WHERE i.plant_id = ANY(:plant_ids)" if plant_ids else ""
+            sql = f"""
+            SELECT
+                i.inverter_id,
+                b.block_name,
+                CAST(i.rated_dc_kw AS FLOAT) AS rated_dc_kw,
+                CAST(i.rated_ac_kw AS FLOAT) AS rated_ac_kw
+            FROM inverters i
+            JOIN blocks b ON i.block_id = b.block_id
+            {i_filter}
+            ORDER BY i.plant_id, i.block_id, i.inverter_id
+            """
+            df = pd.read_sql_query(text(sql), conn, params=params if params else None)
+            total_count = len(df)
+            capped_df = df.head(50)
+            inverters_list = capped_df.to_dict(orient="records")
+            data_ref = DataStore.store(capped_df)
+            metrics = {
+                "total_count": total_count,
+                "returned_count": len(capped_df),
+                "total_rated_dc_kw": round(float(df["rated_dc_kw"].sum()), 2) if not df.empty else 0.0,
+                "total_rated_ac_kw": round(float(df["rated_ac_kw"].sum()), 2) if not df.empty else 0.0,
+            }
+            return {
+                "level": "inverters",
+                "inverters": inverters_list,
+                "data": inverters_list,
+                "data_ref": data_ref,
+                "total_count": total_count,
+                "returned_count": len(capped_df),
+                "data_coverage": data_coverage,
+                "metrics": metrics,
+                "summary": f"Retrieved {len(capped_df)} inverters (total {total_count} matching).",
+            }
+        else:
+            raise ValueError(f"Invalid level '{level}'. Must be 'plants', 'blocks', or 'inverters'.")
+
+
+@tool(args_schema=GetPlantOverviewSchema)
+def get_plant_overview_tool(
+    plant_ids: Optional[list[int]] = None,
+    level: str = "plants",
+) -> dict:
+    """
+    Returns plant, block, or inverter structural overview and telemetry data coverage.
+
+    Args:
+        plant_ids: Optional list of plant_id integers to filter.
+        level:     'plants', 'blocks', or 'inverters' (default: 'plants').
+    """
+    return get_plant_overview(plant_ids=plant_ids, level=level)
+

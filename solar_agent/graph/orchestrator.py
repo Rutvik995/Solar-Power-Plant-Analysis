@@ -89,26 +89,31 @@ SUPPORTED KPIS:
 - soiling loss (energy loss and percentage; computed via estimate_soiling_loss)
 
 TOOL ROUTING (critical — follow exactly):
+- "overview", "introduction", "short introduction", "introduce", "describe", "list", "how many", "capacity", "layout" → intent "overview":
+  Task t1: agent "data", tool "get_plant_overview", level "plants", include_blocks true.
+  Task t2: agent "performance", tool "compute_kpis", level "plant", period "total", depends_on ["t1"].
+  (Both tasks run directly in code with zero specialist agent LLM calls).
 - "yield without soiling", "clean yield", "soiling loss in kWh", "soiling loss percentage", "how much energy lost to soiling", "soiling ratio affect yield" → agent "environment" using estimate_soiling_loss_tool.
 - "expected yield", "PR", "performance ratio", "capacity factor", "specific yield", "total yield", "KPI" → agent "performance" using compute_kpis_tool.
 - Do NOT use compute_kpis for soiling or clean-yield questions. Do NOT use estimate_soiling_loss for PR or expected yield.
 
 RULES:
-1. Every plan MUST start with a "data" task (t1) that fetches the telemetry.
+1. Every plan MUST start with a "data" task (t1).
 2. All later tasks depend_on the data task (at minimum).
 3. Tasks that can run in parallel (e.g. fault + environment both analysing the same data)
    should share the same dependency, NOT depend on each other.
 4. Task IDs must be "t1", "t2", "t3", etc.
 5. inputs may reference a previous task's output with the string "$t1.data_ref".
-6. If the query is out-of-scope (e.g. weather forecasting, stock prices, financial modelling, topics
-   unrelated to solar plant operations), return {"out_of_scope": true, "reason": "..."}.
+6. OUT-OF-SCOPE RULE: Out of scope means ONLY non-solar topics (e.g. sports, movies, politics, recipes, stocks), future forecasts (future unrecorded time), or controlling equipment (e.g. turning off inverters, curtailment). When unsure, prefer an in-scope reading. Requests for general introduction ("give me short introduction to all the plants", "describe the plants") are IN-SCOPE under intent "overview".
+   If the user clarifies or rephrases (e.g. "i mean solar plants"), treat the new message together with the previous question.
+   If out of scope, return {"out_of_scope": true, "reason": "I can’t help with that, but I can answer questions about your solar plants."}.
    CRITICAL FORECAST RULE: "forecast" or "predict" means FUTURE dates only (future unrecorded time) and is out of scope.
    Requests for historical or specified-period "expected yield" (such as "What is the expected yield for Plant 1 in September 2026?") are standard KPI calculations (theoretical expected yield based on irradiance and DC capacity), NOT future forecasts! Always plan them using agent "data" (t1) and agent "performance" (t2: compute_kpis).
 7. NEVER include numeric calculations, formulas, or data values in the plan.
 8. At most one task per agent unless the tools differ; no duplicate fault tasks. NEVER include a second task for the same agent to 'synthesize', 'correlate', or 'explain' findings—the Synthesizer node handles final explanations automatically.
 9. For multi-plant queries or comparisons across all plants, set all_plants=true (and plant_ids=[]).
 
-INTENT TYPES: performance_ranking, fault_diagnosis, comparison, trend, environmental_impact,
+INTENT TYPES: overview, performance_ranking, fault_diagnosis, comparison, trend, environmental_impact,
               root_cause, summary, out_of_scope.
 
 OUTPUT FORMAT (JSON only, no markdown code fences):
@@ -143,8 +148,9 @@ OUTPUT FORMAT (JSON only, no markdown code fences):
 """
 
 _OUT_OF_SCOPE_TOPICS = [
-    "weather forecast", "stock", "financial", "investment", "crypto",
-    "recipe", "sport", "news", "politic",
+    "weather forecast", "future forecast", "stock", "financial", "investment", "crypto",
+    "bitcoin", "recipe", "sport", "cricket", "football", "baseball", "tennis", "basketball",
+    "movie", "news", "politic", "turn off", "shutdown", "switch off", "control inverter", "set inverter",
 ]
 
 # ---------------------------------------------------------------------------
@@ -302,12 +308,30 @@ def _normalize_scope_and_tasks(payload: dict, query: str, prev_scope: dict | Non
         t1 = tasks[0]
         if isinstance(t1, dict) and t1.get("agent") == "data":
             t1_inputs = t1.get("inputs") or {}
-            t1_inputs["plant_ids"] = plant_ids if plant_ids else None
-            t1_inputs["block_ids"] = block_ids if block_ids else None
-            t1_inputs["all_plants"] = all_plants
-            t1_inputs["start_date"] = start_d.isoformat()
-            t1_inputs["end_date"] = end_d.isoformat()
-            t1["inputs"] = t1_inputs
+            if payload.get("intent") == "overview" or t1_inputs.get("tool") == "get_plant_overview":
+                t1_inputs["tool"] = "get_plant_overview"
+                t1_inputs["level"] = t1_inputs.get("level", "plants")
+                t1_inputs["include_blocks"] = True
+                if plant_ids:
+                    t1_inputs["plant_ids"] = plant_ids
+                t1["inputs"] = t1_inputs
+            else:
+                t1_inputs["plant_ids"] = plant_ids if plant_ids else None
+                t1_inputs["block_ids"] = block_ids if block_ids else None
+                t1_inputs["all_plants"] = all_plants
+                t1_inputs["start_date"] = start_d.isoformat()
+                t1_inputs["end_date"] = end_d.isoformat()
+                t1["inputs"] = t1_inputs
+
+        if payload.get("intent") == "overview" and len(tasks) > 1:
+            t2 = tasks[1]
+            if isinstance(t2, dict) and t2.get("agent") == "performance":
+                t2_inputs = t2.get("inputs") or {}
+                t2_inputs["tool"] = "compute_kpis"
+                t2_inputs["level"] = "plant"
+                t2_inputs["period"] = "total"
+                t2["inputs"] = t2_inputs
+                t2["depends_on"] = ["t1"]
 
         # Enforce: at most one task per agent unless tools differ; no duplicate fault tasks
         seen_agents: dict[str, dict] = {}
@@ -385,19 +409,6 @@ class Orchestrator:
         replan_count = state.get("replan_count", 0)
         prev_validation = state.get("validation")
 
-        # Quick heuristic out-of-scope guard before calling the LLM
-        query_lower = query.lower()
-        if any(kw in query_lower for kw in _OUT_OF_SCOPE_TOPICS):
-            logger.info("Orchestrator: query appears out-of-scope (heuristic).")
-            return {
-                "is_out_of_scope": True,
-                "final_answer": (
-                    "This system analyses solar power plant telemetry. "
-                    "Your question appears to be outside that scope. "
-                    "Please ask about plant performance, faults, soiling losses, or weather effects."
-                ),
-            }
-
         # Check for previous query, tasks, and scope context on the same thread
         prev_scope = state.get("previous_scope")
         if not prev_scope and state.get("plan") and replan_count == 0:
@@ -409,8 +420,33 @@ class Orchestrator:
         prev_query = state.get("previous_query")
         prev_tasks = state.get("previous_tasks")
 
+        # Clarification handling: if user clarifies or rephrases, combine with previous query
+        query_strip = query.strip()
+        query_lower = query_strip.lower()
+        clarification_markers = ["i mean", "meaning", "i meant", "referring to", "clarification", "actually"]
+        is_clarification = any(query_lower.startswith(m) for m in clarification_markers)
+        if not is_clarification and prev_query and len(query_strip.split()) <= 4 and any(w in query_lower for w in ["solar", "plants", "plant", "inverter", "block"]):
+            is_clarification = True
+
+        effective_query = f"{prev_query} (Clarification: {query_strip})" if (is_clarification and prev_query) else query_strip
+        effective_lower = effective_query.lower()
+
+        # Narrow out-of-scope rule: Out of scope means ONLY non-solar topics, future forecasts, or controlling equipment.
+        # When unsure, prefer an in-scope reading.
+        is_solar = any(w in effective_lower for w in ["solar", "plant", "inverter", "block", "kpi", "pr", "yield", "soiling", "irradiance", "megawatt", "mwp", "generation"])
+        is_non_solar_or_control = any(kw in effective_lower for kw in _OUT_OF_SCOPE_TOPICS)
+
+        if is_non_solar_or_control and (not is_solar or any(c in effective_lower for c in ["cricket", "football", "baseball", "tennis", "turn off", "shutdown", "switch off"])):
+            logger.info("Orchestrator: query appears out-of-scope (heuristic).")
+            return {
+                "is_out_of_scope": True,
+                "final_answer": "I can’t help with that, but I can answer questions about your solar plants.",
+                "headline": "**I can’t help with that, but I can answer questions about your solar plants.**",
+                "explanation": "",
+            }
+
         # Build the human message
-        human_parts = [f"User query: {query}"]
+        human_parts = [f"User query: {effective_query}"]
         if prev_query or prev_tasks or prev_scope:
             context_desc = []
             if prev_query:
@@ -425,6 +461,7 @@ class Orchestrator:
 
             human_parts.append(
                 f"\nContext from previous query on this thread: {'; '.join(context_desc)}. "
+                "If the user clarifies or rephrases (e.g. 'i mean solar plants'), treat the new message together with the previous question. "
                 "If the user query is a follow-up (e.g. 'the same for Plant 2', 'same for Plant 2', 'now Plant 2', 'what about Plant 2'), "
                 "repeat the previous analysis type (agent, tools, metrics) for the new plant/entity specified by the user, "
                 "inheriting the date range unless overridden."
@@ -616,6 +653,29 @@ class Orchestrator:
                     ],
                     "success_criteria": "Answer the user question."
                 }
+            elif any(w in effective_lower for w in ["overview", "introduction", "short introduction", "introduce", "describe", "layout", "capacity", "how many", "structure", "all the plants", "all plants"]):
+                intent = "overview"
+                payload = {
+                    "intent": "overview",
+                    "scope": _default_scope(),
+                    "tasks": [
+                        {
+                            "id": "t1",
+                            "agent": "data",
+                            "description": "Retrieve structural overview of solar plants and blocks.",
+                            "inputs": {"tool": "get_plant_overview", "level": "plants", "include_blocks": True},
+                            "depends_on": [],
+                        },
+                        {
+                            "id": "t2",
+                            "agent": "performance",
+                            "description": "Compute plant-level KPI snapshot over the last 30 days of data.",
+                            "inputs": {"tool": "compute_kpis", "level": "plant", "period": "total"},
+                            "depends_on": ["t1"],
+                        },
+                    ],
+                    "success_criteria": "Introduce and describe the solar power plants and their baseline performance.",
+                }
             else:
                 intent = "summary"
                 agent = "performance"
@@ -663,9 +723,12 @@ class Orchestrator:
 
         # Handle explicit out-of-scope response
         if payload.get("out_of_scope"):
+            friendly_refusal = "I can’t help with that, but I can answer questions about your solar plants."
             return {
                 "is_out_of_scope": True,
-                "final_answer": payload.get("reason", "Query is out of scope."),
+                "final_answer": friendly_refusal,
+                "headline": f"**{friendly_refusal}**",
+                "explanation": "",
             }
 
         # Normalize scope and tasks in code

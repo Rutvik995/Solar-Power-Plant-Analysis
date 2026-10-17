@@ -13,3 +13,11 @@ status_code: "A numerical operational code reported by inverters indicating norm
 specific_yield: "The total energy generated divided by the plant's installed DC capacity, measuring generation efficiency per unit of size."
 capacity_factor: "The ratio of actual electrical energy generated over a period to the maximum possible energy output if running at full capacity continuously."
 peer_comparison: "A benchmarking technique evaluating an inverter's output against neighboring inverters within the same block or plant under identical weather conditions."
+
+# Overview terminology
+plant: "A complete solar power generation facility consisting of multiple blocks, inverters, solar panels, and grid connection equipment."
+block: "A modular subsection of a solar power plant grouping multiple inverters and solar arrays."
+inverter: "An electrical device that converts direct current (DC) electricity produced by solar panels into alternating current (AC) electricity for the grid."
+mwp: "Megawatt-peak, a unit measuring the maximum rated DC power output of a solar power plant under standard test conditions."
+MWp: "Megawatt-peak, a unit measuring the maximum rated DC power output of a solar power plant under standard test conditions."
+

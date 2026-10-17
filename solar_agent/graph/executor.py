@@ -325,6 +325,36 @@ class Executor:
         max_attempts = 1 + settings.task_max_retries
         last_result: TaskResult | None = None
 
+        # Direct execution optimization (0 agent LLM calls for deterministic tools)
+        if inputs.get("tool") == "compute_kpis" or (task.agent == "performance" and "snapshot" in task.description.lower()):
+            from datetime import timedelta
+            from solar_agent.db import queries as q
+            from solar_agent.tools.data_tools import fetch_inverter_daily_tool
+            from solar_agent.tools.performance_tools import compute_kpis
+
+            data_ref = inputs.get("data_ref")
+            if not data_ref or not DataStore.get(data_ref):
+                max_d = q.get_max_log_date()
+                min_d = max(q.get_min_log_date(), max_d - timedelta(days=29))
+                fetch_res = fetch_inverter_daily_tool.invoke({
+                    "start_date": min_d.isoformat(),
+                    "end_date": max_d.isoformat(),
+                    "all_plants": True,
+                })
+                data_ref = fetch_res.get("data_ref")
+
+            level = inputs.get("level", "plant")
+            period = inputs.get("period", "total")
+            kpi_res = compute_kpis(data_ref=data_ref, level=level, period=period)
+            return TaskResult(
+                task_id=task.id,
+                status=TaskStatus.DONE,
+                summary="Computed plant-level KPI snapshot over the last 30 days of data.",
+                data_ref=kpi_res.get("data_ref", data_ref),
+                metrics=kpi_res.get("metrics", {}),
+                tool_calls_made=["compute_kpis_tool"],
+            )
+
         for attempt in range(max_attempts):
             token = get_cancel_token(run_id)
             if token:

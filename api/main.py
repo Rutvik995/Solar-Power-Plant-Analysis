@@ -587,6 +587,54 @@ def _format_plan_steps(plan_obj: Any, results_dict: dict[str, Any]) -> list[dict
     return plan_data
 
 
+def get_suggestions(intent: str, is_out_of_scope: bool = False, plan_obj: Any = None) -> list[str]:
+    """Return up to 4 contextual suggestions chosen by answer type / intent."""
+    if is_out_of_scope:
+        return [
+            "Give me a short introduction to all the plants",
+            "What was the performance ratio of Plant 1?",
+            "Were there any inverter faults in September 2026?",
+            "How much energy was lost to soiling in Plant 2?",
+        ]
+
+    intent_str = str(intent).lower()
+    if "overview" in intent_str:
+        return [
+            "Show block details for Plant 1",
+            "List inverters in Block A of Plant 1",
+            "What was the performance ratio of all plants?",
+            "Were there any inverter faults detected?",
+        ]
+    elif any(k in intent_str for k in ["performance", "summary", "ranking", "trend", "comparison"]):
+        return [
+            "Show as chart",
+            "Were there any inverter faults during this period?",
+            "How much energy was lost to soiling?",
+            "Compare performance across all plants",
+        ]
+    elif any(k in intent_str for k in ["fault", "root_cause"]):
+        return [
+            "Show performance ratio for flagged inverters",
+            "What was the peer irradiance during these events?",
+            "Show as chart",
+            "Check soiling losses for this period",
+        ]
+    elif any(k in intent_str for k in ["environment", "soiling"]):
+        return [
+            "When was the last cleaning event?",
+            "What was the total energy loss to soiling?",
+            "Show as chart",
+            "Were there any inverter faults?",
+        ]
+    else:
+        return [
+            "Give me a short introduction to all the plants",
+            "Show as chart",
+            "Check for faults in Plant 1",
+            "What was the performance ratio?",
+        ]
+
+
 def format_structured_payload(
     result: dict[str, Any],
     elapsed_ms: float,
@@ -600,8 +648,20 @@ def format_structured_payload(
     # 1. Error & Text outputs
     err_obj = None
     error_code = None
+    is_refusal = bool(result.get("is_out_of_scope"))
 
-    if isinstance(exc, CacheMissError) or (exc and type(exc).__name__ == "CacheMissError"):
+    if is_refusal:
+        friendly_refusal = "I can’t help with that, but I can answer questions about your solar plants."
+        ans = friendly_refusal
+        short_answer = friendly_refusal
+        headline = f"**{friendly_refusal}**"
+        explanation = ""
+        key_points = []
+        notes = []
+        details_markdown = ""
+        raw_assumptions = []
+        raw_warnings = []
+    elif isinstance(exc, CacheMissError) or (exc and type(exc).__name__ == "CacheMissError"):
         msg = "This query was not recorded in replay cache. Switch to live or record mode to execute."
         ans = msg
         short_answer = msg
@@ -617,6 +677,8 @@ def format_structured_payload(
             "type": "CacheMissError",
             "message": msg,
         }
+        raw_assumptions = []
+        raw_warnings = []
     elif isinstance(exc, Cancelled):
         ans = "Execution stopped by user."
         short_answer = "Execution stopped by user."
@@ -630,6 +692,8 @@ def format_structured_payload(
             "type": "Cancelled",
             "message": str(exc) or "Execution stopped by user.",
         }
+        raw_assumptions = []
+        raw_warnings = []
     elif isinstance(exc, BudgetExceeded):
         ans = f"LLM call budget exceeded: {exc}"
         short_answer = f"LLM call budget exceeded: {exc}"
@@ -643,6 +707,8 @@ def format_structured_payload(
             "type": "BudgetExceeded",
             "message": str(exc),
         }
+        raw_assumptions = []
+        raw_warnings = []
     elif exc is not None:
         ans = f"Execution error: {exc}"
         short_answer = f"Execution error: {exc}"
@@ -656,6 +722,8 @@ def format_structured_payload(
             "type": type(exc).__name__,
             "message": str(exc),
         }
+        raw_assumptions = []
+        raw_warnings = []
     else:
         # Check if result was flagged as not_recorded
         if result.get("error_code") == "not_recorded":
@@ -674,6 +742,8 @@ def format_structured_payload(
                 "type": "CacheMissError",
                 "message": msg,
             }
+            raw_assumptions = []
+            raw_warnings = []
         else:
             ans = normalize_spaces(result.get("final_answer") or "")
             headline = result.get("headline")
@@ -707,9 +777,9 @@ def format_structured_payload(
                     "type": "BudgetExceeded",
                     "message": "LLM call budget exceeded during pipeline execution.",
                 }
+            raw_assumptions = list(result.get("assumptions") or [])
+            raw_warnings = list(result.get("warnings") or [])
 
-    raw_assumptions = list(result.get("assumptions") or [])
-    raw_warnings = list(result.get("warnings") or [])
     if isinstance(exc, Cancelled) and "Execution stopped by user." not in raw_warnings:
         raw_warnings.append("Execution stopped by user.")
     elif isinstance(exc, BudgetExceeded) and str(exc) not in raw_warnings:
@@ -728,11 +798,16 @@ def format_structured_payload(
     notes = [sanitize_answer_text(n) for n in notes]
 
     # 2. Tables: ONLY from analysis task outputs (performance, fault, environment)
-    if "tables" in result and isinstance(result["tables"], list) and result["tables"]:
+    if is_refusal:
+        tables = []
+    elif "tables" in result and isinstance(result["tables"], list) and result["tables"]:
         tables = result["tables"]
     else:
         try:
             tables = build_analysis_tables(result.get("plan"), results_dict)
+        except Exception as t_err:
+            logger.warning("Failed to build analysis tables: %s", t_err)
+            tables = []
         except Exception as t_err:
             logger.warning("Failed to build analysis tables: %s", t_err)
             tables = []
@@ -815,6 +890,18 @@ def format_structured_payload(
         "row_counts": row_counts,
     }
 
+    intent_val = None
+    if plan_obj and hasattr(plan_obj, "intent"):
+        intent_val = getattr(plan_obj.intent, "value", str(plan_obj.intent))
+    elif result.get("intent"):
+        intent_val = str(result.get("intent"))
+
+    suggestions = get_suggestions(
+        intent=intent_val or "summary",
+        is_out_of_scope=is_refusal,
+        plan_obj=plan_obj,
+    )
+
     payload = {
         "headline": headline,
         "explanation": explanation,
@@ -835,6 +922,9 @@ def format_structured_payload(
         "llm_calls": llm_calls,
         "elapsed_ms": elapsed_ms,
         "error": err_obj,
+        "suggestions": suggestions[:4],
+        "is_out_of_scope": is_refusal,
+        "intent": intent_val,
     }
     if error_code:
         payload["error_code"] = error_code
