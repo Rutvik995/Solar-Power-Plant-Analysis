@@ -1,0 +1,32 @@
+# Dashboard configuration for /api/dashboard/* endpoints
+# -----------------------------------------------------------
+# Health band thresholds (percentage points below fleet PR median)
+health:
+  amber_threshold_pp: 3.0   # PR more than 3 pp below fleet median → amber
+  red_threshold_pp: 8.0     # PR more than 8 pp below fleet median → red
+
+# Availability definition:
+# An inverter-day counts as "available" when:
+#   - irradiance > low_irradiance_threshold  (same as min_irradiance_kwh_m2 in settings)
+#   - status_code NOT in fault codes
+#   - total_daily_yield_kwh > zero_generation_max_yield_kwh
+availability:
+  # Override the irradiance threshold here (null = use settings.min_irradiance_kwh_m2)
+  irradiance_threshold: null
+
+# Open alerts: flagged inverter-days (zero gen under irradiance OR fault status)
+# Uses the same rules as fault_tools.py / detect_zero_generation
+alerts:
+  include_zero_gen: true
+  include_status_faults: true   # _FAULT_CODES from status_codes.yaml
+
+# Heatmap cap: maximum days returned in /heatmap endpoint
+heatmap:
+  max_days: 60
+
+# Sparkline cap: maximum points in sparkline arrays
+sparkline:
+  max_points: 30
+
+# Cache TTL for all dashboard endpoints (seconds)
+cache_ttl_seconds: 60

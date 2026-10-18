@@ -71,6 +71,7 @@ from solar_agent.tools.table_formatter import (
 )
 from solar_agent.tools import metrics as m
 from solar_agent.tools.fault_tools import _EXCLUDE_YIELD_CODES, _FAULT_CODES
+from api.dashboard import router as dashboard_router
 
 logger = logging.getLogger(__name__)
 
@@ -154,6 +155,9 @@ def on_startup():
         init_chat_db()
     except Exception as exc:
         logger.error("Failed to initialize chat database on startup: %s", exc)
+
+
+app.include_router(dashboard_router)
 
 
 

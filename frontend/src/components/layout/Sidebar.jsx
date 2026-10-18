@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { NavLink, useNavigate, useMatch } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
+  LayoutDashboard,
   MessageSquareText,
   Info,
   Sun,
@@ -20,6 +21,11 @@ import {
 } from '../../services/api';
 
 const NAV_ITEMS = [
+  {
+    name: 'Dashboard',
+    path: '/dashboard',
+    icon: LayoutDashboard,
+  },
   {
     name: 'Chat',
     path: '/',

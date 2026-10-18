@@ -34,7 +34,51 @@ export async function fetchMeta() {
 }
 
 /**
- * Fetch dashboard KPIs (yield, PR, soiling loss %, fault days, previous period, sparkline).
+ * Fetch dashboard overview (fleet KPIs, plants table, daily series, data quality).
+ */
+export async function fetchDashboardOverview({ plantId, start, end, agg = 'day' } = {}) {
+  const params = new URLSearchParams();
+  if (plantId && plantId !== 'all') params.append('plant_id', plantId);
+  if (start) params.append('start', start);
+  if (end) params.append('end', end);
+  if (agg) params.append('agg', agg);
+
+  const qs = params.toString() ? `?${params.toString()}` : '';
+  const res = await fetch(`${BASE_URL}/dashboard/overview${qs}`);
+  return handleResponse(res);
+}
+
+/**
+ * Fetch per-plant dashboard detail (blocks, best/worst inverters, weather series, treemap).
+ */
+export async function fetchDashboardPlantDetail({ plantId, start, end, agg = 'day' } = {}) {
+  if (!plantId || plantId === 'all') return null;
+  const params = new URLSearchParams();
+  if (start) params.append('start', start);
+  if (end) params.append('end', end);
+  if (agg) params.append('agg', agg);
+
+  const qs = params.toString() ? `?${params.toString()}` : '';
+  const res = await fetch(`${BASE_URL}/dashboard/plant/${plantId}${qs}`);
+  return handleResponse(res);
+}
+
+/**
+ * Fetch plant PR heatmap matrix.
+ */
+export async function fetchDashboardHeatmapMatrix({ plantId, start, end } = {}) {
+  if (!plantId || plantId === 'all') return null;
+  const params = new URLSearchParams();
+  if (start) params.append('start', start);
+  if (end) params.append('end', end);
+
+  const qs = params.toString() ? `?${params.toString()}` : '';
+  const res = await fetch(`${BASE_URL}/dashboard/plant/${plantId}/heatmap${qs}`);
+  return handleResponse(res);
+}
+
+/**
+ * Fetch dashboard KPIs (legacy helper).
  */
 export async function fetchDashboardKpis({ plantId, start, end } = {}) {
   const params = new URLSearchParams();
