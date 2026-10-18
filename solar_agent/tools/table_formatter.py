@@ -77,6 +77,14 @@ _DEFAULT_DISPLAY_LABELS = {
     "irradiance": "Irradiance",
     "cell_temp_c": "Cell temperature (°C)",
     "ambient_temp_c": "Ambient temperature (°C)",
+    "detect_zero_generation_tool": "No power produced",
+    "detect_zero_generation": "No power produced",
+    "detect_anomalies_tool": "Unusual readings",
+    "detect_anomalies": "Unusual readings",
+    "detect_status_faults_tool": "Reported fault",
+    "detect_status_faults": "Reported fault",
+    "detect_peer_underperformance_tool": "Underperforming peers",
+    "detect_peer_underperformance": "Underperforming peers",
 }
 
 _DEFAULT_GLOSSARY = {
@@ -556,6 +564,7 @@ def build_analysis_tables(
                             "flagged_by": [flag_tool],
                             "pr": item.get("pr", item.get("performance_ratio")),
                             "peer_pr": item.get("peer_pr"),
+                            "peer_count": item.get("peer_count"),
                         }
                     else:
                         if flag_tool not in grouped[key]["flagged_by"]:
@@ -566,12 +575,15 @@ def build_analysis_tables(
                 for g in list(grouped.values())[:50]:
                     pr_val = g.get("pr")
                     peer_pr_val = g.get("peer_pr")
-                    if not is_missing(pr_val) and not is_missing(peer_pr_val):
+                    peer_cnt = g.get("peer_count")
+                    if peer_cnt == 0 or is_missing(peer_pr_val):
+                        actual_vs_peers = "n/a"
+                    elif not is_missing(pr_val) and not is_missing(peer_pr_val):
                         actual_vs_peers = f"{format_pr_value(pr_val)} vs {format_pr_value(peer_pr_val)}"
                     elif not is_missing(pr_val):
-                        actual_vs_peers = format_pr_value(pr_val)
+                        actual_vs_peers = f"{format_pr_value(pr_val)} vs n/a"
                     else:
-                        actual_vs_peers = "-"
+                        actual_vs_peers = "n/a"
 
                     row = [
                         format_table_cell(g["inverter_id"], "inverter_id"),

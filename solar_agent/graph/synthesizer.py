@@ -65,6 +65,8 @@ RULES:
 6. Use ONLY the numbers provided in the task summaries and tables below. DO NOT invent or estimate any numbers. Every number must come directly from tool outputs.
 7. Write all numbers as plain digits with standard commas for thousands (e.g., 250,610).
 8. Report PR as a percentage (e.g. 82.5%).
+9. FAULT EXPLANATIONS: State ONLY what the data explicitly shows (status code, zero power output, how peers performed). NEVER state or invent a root cause (e.g. "because of high temperature", "due to overheating", "communication glitch", "minor grid deviation") unless a tool output specifically supports it. Status code descriptions only list examples of possible warnings, NOT confirmed causes. Use "the data doesn't show the exact cause".
+10. PEER & WEATHER CLAIMS: If peer count is 0 or peer fields are null/missing ("n/a"), make NO claims about peer performance or weather conditions (never claim "no sunlight" or "normal weather"). If peer irradiance is 0 or null, never claim there was no sunlight or a measurement issue.
 """
 
 
@@ -244,9 +246,11 @@ def build_deterministic_fallback(
                 pr_vals.append(float(v))
             if ("yield" in k or "energy" in k) and isinstance(v, (int, float)):
                 yield_vals.append(float(v))
-        flagged = metrics.get("flagged_items") or []
-        if flagged:
-            flagged_count += len(flagged)
+    all_flagged_items = []
+    for t_id, tr in results.items():
+        if tr and getattr(tr, "metrics", None):
+            f_items = tr.metrics.get("flagged_items") or []
+            all_flagged_items.extend(f_items)
 
     # 1. Templated headline
     if pr_vals and yield_vals:
@@ -260,12 +264,32 @@ def build_deterministic_fallback(
         yield_disp = format_energy_value(yield_vals[0])
         headline = f"**{plant_str} produced {yield_disp} of electrical energy during this period.**"
     elif flagged_count > 0:
-        headline = f"**Fault analysis identified {flagged_count} inverter events requiring inspection.**"
+        if all_flagged_items and all_flagged_items[0].get("inverter_id"):
+            f_inv = all_flagged_items[0].get("inverter_id")
+            f_dt = all_flagged_items[0].get("date")
+            headline = f"**Inverter {f_inv} produced no power on {f_dt}.**"
+        else:
+            headline = f"**Fault analysis identified {flagged_count} inverter events requiring inspection.**"
     else:
         headline = f"**Analysis completed for {plant_str}.**"
 
     # 2. Explanation
-    explanation = f"Operational data and performance analysis have been compiled for {plant_str}."
+    if all_flagged_items:
+        f = all_flagged_items[0]
+        f_inv = f.get("inverter_id")
+        f_sc = f.get("status_code", 0)
+        f_peer_pr = f.get("peer_pr")
+        f_peer_irr = f.get("peer_irradiance")
+        f_peer_cnt = f.get("peer_count", 1 if f_peer_pr is not None else 0)
+        detail_parts = [f"Inverter {f_inv} produced 0 kWh (status code {f_sc})"]
+        if f_peer_cnt > 0 and f_peer_pr is not None:
+            peer_pr_str = format_pr_value(f_peer_pr)
+            detail_parts.append(f"while block peers achieved an average performance ratio of {peer_pr_str}")
+            if f_peer_irr is not None and f_peer_irr > 0:
+                detail_parts.append(f"under {f_peer_irr:.2f} kWh/m² irradiance")
+        explanation = " ".join(detail_parts) + ". The data doesn't show the exact cause."
+    else:
+        explanation = f"Operational data and performance analysis have been compiled for {plant_str}."
 
     # 3. Key points
     key_points = []
@@ -494,6 +518,39 @@ class Synthesizer:
         key_points = [sanitize_answer_text(kp) for kp in key_points]
         notes = [sanitize_answer_text(n) for n in notes]
 
+        # Guard against speculative causes or incorrect peer/weather claims in fault explanations
+        is_fault_query = any(task.agent == "fault" for task in (plan.tasks if plan else []))
+        if is_fault_query:
+            has_temp_evidence = False
+            for task in (plan.tasks if plan else []):
+                tr = results.get(task.id)
+                if tr and tr.metrics:
+                    if tr.metrics.get("max_module_temp_c", 0) > 75:
+                        has_temp_evidence = True
+
+            def _clean_fault_claims(text: str) -> str:
+                if not text:
+                    return text
+                t = text
+                if not has_temp_evidence:
+                    t = re.sub(
+                        r"(?:because\s+(?:it|of)|due to|suggesting)\s+(?:a\s+)?(?:high temperature|overheating|communication glitch|minor issue|minor grid deviation)[^\.,;]*",
+                        "the data doesn't show the exact cause",
+                        t,
+                        flags=re.IGNORECASE,
+                    )
+                t = re.sub(
+                    r"(?:suggesting\s+)?(?:no sunlight|zero sunlight)\s+or\s+a\s+measurement issue\.?",
+                    "the data doesn't show the exact cause.",
+                    t,
+                    flags=re.IGNORECASE,
+                )
+                return t
+
+            explanation = _clean_fault_claims(explanation)
+            headline = _clean_fault_claims(headline)
+            key_points = [_clean_fault_claims(kp) for kp in key_points]
+
         # Ensure fault anomaly sentence is included in explanation / key points if present
         for task in (plan.tasks if plan else []):
             if task.agent == "fault":
@@ -559,8 +616,18 @@ class Synthesizer:
                 except Exception:
                     pass
 
-        if not dates_found and plan and plan.scope and plan.scope.start_date and plan.scope.end_date:
-            dates_found = [plan.scope.start_date, plan.scope.end_date]
+        # Ensure only real date objects are in dates_found
+        dates_found = [d for d in dates_found if isinstance(d, (date, datetime))]
+        if not dates_found and plan and getattr(plan, "scope", None):
+            s_d = getattr(plan.scope, "start_date", None)
+            e_d = getattr(plan.scope, "end_date", None)
+            if isinstance(s_d, (date, datetime)) and isinstance(e_d, (date, datetime)):
+                dates_found = [s_d, e_d]
+            elif isinstance(s_d, str) and isinstance(e_d, str):
+                try:
+                    dates_found = [date.fromisoformat(s_d), date.fromisoformat(e_d)]
+                except Exception:
+                    pass
         if not dates_found:
             dates_found = [date(2026, 9, 1), date(2026, 9, 26)]
 

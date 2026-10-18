@@ -87,11 +87,31 @@ class DataAgent:
                     tool_calls_made=tool_calls_made,
                 )
 
-            plant_ids   = inputs.get("plant_ids") or []
-            block_ids   = inputs.get("block_ids") or []
-            inverter_ids = inputs.get("inverter_ids") or []
+            plant_ids   = list(inputs.get("plant_ids") or [])
+            block_ids   = list(inputs.get("block_ids") or [])
+            inverter_ids = list(inputs.get("inverter_ids") or [])
+            named_inverter_ids = list(inputs.get("named_inverter_ids") or [])
             start_date  = inputs.get("start_date")
             end_date    = inputs.get("end_date")
+
+            # When inverter(s) are named, fetch the whole block (all inverters in that block)
+            all_named = list(dict.fromkeys(inverter_ids + named_inverter_ids))
+            if all_named:
+                try:
+                    from solar_agent.db import queries as q
+                    all_inv = q.get_all_inverters()
+                    matched = all_inv[all_inv["inverter_id"].str.upper().isin([i.upper() for i in all_named])]
+                    if not matched.empty:
+                        for p in matched["plant_id"].unique():
+                            if int(p) not in plant_ids:
+                                plant_ids.append(int(p))
+                        for b in matched["block_id"].unique():
+                            if int(b) not in block_ids:
+                                block_ids.append(int(b))
+                except Exception as e:
+                    logger.warning("Could not resolve block for inverters %s: %s", all_named, e)
+                # DO NOT filter inverter_ids in fetch_kwargs — fetch the whole block
+                inverter_ids = []
 
             if not start_date or not end_date:
                 raise ValueError(
@@ -107,7 +127,7 @@ class DataAgent:
             if plant_ids:
                 fetch_kwargs["plant_ids"] = list(plant_ids)
             if block_ids:
-                fetch_kwargs["block_ids"] = list(block_ids)
+                fetch_kwargs["block_ids"] = [str(b) for b in block_ids]
             if inverter_ids:
                 fetch_kwargs["inverter_ids"] = list(inverter_ids)
 
@@ -169,7 +189,7 @@ class DataAgent:
                 status=TaskStatus.DONE,
                 summary=clean_task_summary(f"Fetched {row_count} inverter-days from {start_date} to {end_date}."),
                 data_ref=data_ref,
-                metrics={"row_count": row_count},
+                metrics={"row_count": row_count, "named_inverter_ids": all_named} if all_named else {"row_count": row_count},
                 warnings=warnings,
                 tool_calls_made=tool_calls_made,
                 latency_ms=(time.monotonic() - t_start) * 1000,

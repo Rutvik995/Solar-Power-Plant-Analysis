@@ -181,8 +181,8 @@ def test_fault_table_five_columns_and_peer_irradiance_note():
     assert row[0] == "P1_Block_A_INV_02"
     assert row[1] == "Block A"
     assert row[2] == "16 Sep 2026"
-    assert "Zero-generation check" in row[3]
-    assert "Unusual-reading check" in row[3]
+    assert "No power produced" in row[3]
+    assert "Unusual readings" in row[3]
     assert "0.0% vs 85.1%" in row[4]
 
     # Peer irradiance moved into a note

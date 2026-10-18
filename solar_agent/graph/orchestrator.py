@@ -243,6 +243,36 @@ def _normalize_scope_and_tasks(payload: dict, query: str, prev_scope: dict | Non
             if b_val not in block_ids:
                 block_ids.append(b_val)
 
+    # Extract named inverter(s) and resolve their whole block & plant
+    all_inverters_df = q.get_all_inverters()
+    known_inv_map = {inv_id.upper(): inv_id for inv_id in all_inverters_df["inverter_id"].tolist()}
+
+    named_inverter_ids: list[str] = []
+    for iid in (scope.get("inverter_ids") or []):
+        up = str(iid).upper()
+        if up in known_inv_map:
+            canon = known_inv_map[up]
+            if canon not in named_inverter_ids:
+                named_inverter_ids.append(canon)
+
+    for token in re.findall(r"\b(P\d+_Block_[A-Za-z0-9]+_INV_\d+)\b", query, re.IGNORECASE):
+        up = token.upper()
+        if up in known_inv_map:
+            canon = known_inv_map[up]
+            if canon not in named_inverter_ids:
+                named_inverter_ids.append(canon)
+
+    if named_inverter_ids:
+        matched_inverters = all_inverters_df[all_inverters_df["inverter_id"].isin(named_inverter_ids)]
+        for _, inv_row in matched_inverters.iterrows():
+            pid = int(inv_row["plant_id"])
+            if pid not in plant_ids:
+                plant_ids.append(pid)
+            bid = int(inv_row["block_id"])
+            bname = str(inv_row["block_name"])
+            if bid not in block_ids and bname not in block_ids:
+                block_ids.append(bid)
+
     # 2. Normalize and clamp date range
     resolved_dates = None
     try:
@@ -285,6 +315,8 @@ def _normalize_scope_and_tasks(payload: dict, query: str, prev_scope: dict | Non
 
     scope["plant_ids"] = plant_ids
     scope["block_ids"] = block_ids
+    scope["inverter_ids"] = named_inverter_ids
+    scope["named_inverter_ids"] = named_inverter_ids
     scope["start_date"] = start_d.isoformat()
     scope["end_date"] = end_d.isoformat()
     scope["all_plants"] = all_plants
@@ -321,7 +353,17 @@ def _normalize_scope_and_tasks(payload: dict, query: str, prev_scope: dict | Non
                 t1_inputs["all_plants"] = all_plants
                 t1_inputs["start_date"] = start_d.isoformat()
                 t1_inputs["end_date"] = end_d.isoformat()
+                if named_inverter_ids:
+                    t1_inputs["named_inverter_ids"] = named_inverter_ids
+                    t1_inputs.pop("inverter_ids", None)
                 t1["inputs"] = t1_inputs
+
+        if named_inverter_ids and len(tasks) > 1:
+            for task in tasks[1:]:
+                if isinstance(task, dict):
+                    t_in = task.get("inputs") or {}
+                    t_in["named_inverter_ids"] = named_inverter_ids
+                    task["inputs"] = t_in
 
         if payload.get("intent") == "overview" and len(tasks) > 1:
             t2 = tasks[1]

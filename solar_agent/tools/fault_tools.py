@@ -33,7 +33,11 @@ with open(STATUS_CODES_PATH, "r", encoding="utf-8") as f:
     }
 
 
-def detect_zero_generation(data_ref: str, irradiance_threshold_kwh_m2: float = 0.5) -> dict[str, Any]:
+def detect_zero_generation(
+    data_ref: str,
+    irradiance_threshold_kwh_m2: float = 0.5,
+    inverter_ids: Optional[list[str]] = None,
+) -> dict[str, Any]:
     """
     Detects inverters reporting ~0 yield on days with sufficient irradiance.
     Skips rows with status codes explicitly flagged to bypass yield checks (e.g. Standby).
@@ -56,6 +60,10 @@ def detect_zero_generation(data_ref: str, irradiance_threshold_kwh_m2: float = 0
     
     # Identify faults
     faults_df = df[mask_h & mask_status & mask_yield].copy()
+
+    # Filter to named inverter after computing baseline across full data
+    if inverter_ids:
+        faults_df = faults_df[faults_df["inverter_id"].isin(inverter_ids)].copy()
     
     res_ref = DataStore.store(faults_df)
     
@@ -67,7 +75,7 @@ def detect_zero_generation(data_ref: str, irradiance_threshold_kwh_m2: float = 0
     }
 
 
-def detect_status_faults(data_ref: str) -> dict[str, Any]:
+def detect_status_faults(data_ref: str, inverter_ids: Optional[list[str]] = None) -> dict[str, Any]:
     """
     Detects explicitly flagged fault statuses (e.g. Fault=3, Offline=4) and counts consecutive days.
     """
@@ -101,17 +109,25 @@ def detect_status_faults(data_ref: str) -> dict[str, Any]:
     # Calculate streak length
     faults["streak_length_days"] = faults.groupby(["inverter_id", "streak_id"])["log_date"].transform("count")
 
+    # Filter to named inverter after computing streaks across full data
+    if inverter_ids:
+        faults = faults[faults["inverter_id"].isin(inverter_ids)].copy()
+
     res_ref = DataStore.store(faults)
     
     return {
         "summary": f"Detected {len(faults)} inverter-days with fault statuses.",
-        "metrics": {"fault_count": len(faults), "max_streak": int(faults["streak_length_days"].max())},
+        "metrics": {"fault_count": len(faults), "max_streak": int(faults["streak_length_days"].max()) if not faults.empty else 0},
         "data_ref": res_ref,
         "warnings": [],
     }
 
 
-def detect_peer_underperformance(data_ref: str, min_consecutive_days: int | None = None) -> dict[str, Any]:
+def detect_peer_underperformance(
+    data_ref: str,
+    min_consecutive_days: int | None = None,
+    inverter_ids: Optional[list[str]] = None,
+) -> dict[str, Any]:
     """
     Identifies inverters significantly underperforming their block peers.
     Uses MAD-based z-score (from metrics.py). Flags if score < -threshold for N days.
@@ -127,7 +143,7 @@ def detect_peer_underperformance(data_ref: str, min_consecutive_days: int | None
     if "performance_ratio" not in df.columns:
         df = m.compute_performance_ratio(df)
         
-    # Compute the score
+    # Compute the score across all peers in the block first
     df = m.compute_peer_deviation(df)
     
     # Filter to severe underperformers
@@ -153,6 +169,10 @@ def detect_peer_underperformance(data_ref: str, min_consecutive_days: int | None
         # Keep only those meeting the consecutive days requirement
         bad = bad[bad["streak_len"] >= min_consecutive_days]
 
+    # Filter to named inverter after computing peer baselines
+    if inverter_ids:
+        bad = bad[bad["inverter_id"].isin(inverter_ids)].copy()
+
     res_ref = DataStore.store(bad)
     
     return {
@@ -169,6 +189,7 @@ def detect_anomalies(
     window_days: int = 14,
     z_threshold: float = 3.0,
     window: int = None,
+    inverter_ids: Optional[list[str]] = None,
 ) -> dict[str, Any]:
     if window is not None:
         window_days = window
@@ -209,7 +230,13 @@ def detect_anomalies(
         # Flag anomalies
         flag_col = f"{col}_is_anomaly"
         df[flag_col] = df[z_col].abs() > z_threshold
-        anomalies_found += df[flag_col].sum()
+        if inverter_ids:
+            anomalies_found += df[df["inverter_id"].isin(inverter_ids)][flag_col].sum()
+        else:
+            anomalies_found += df[flag_col].sum()
+
+    if inverter_ids:
+        df = df[df["inverter_id"].isin(inverter_ids)].copy()
 
     res_ref = DataStore.store(df)
     

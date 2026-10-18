@@ -301,15 +301,55 @@ def resolve_date_range(text: str) -> dict:
             assumption = f"Explicit date range: {_fmt(start)} to {_fmt(end)}"
             return start, end, assumption
 
-        # --- Month expressions: "September 2026", "aug 2026" ---
+        # --- Month expressions & single dates ---
         month_map = {
             "jan": 1, "january": 1, "feb": 2, "february": 2, "mar": 3, "march": 3,
             "apr": 4, "april": 4, "may": 5, "jun": 6, "june": 6, "jul": 7, "july": 7,
-            "aug": 8, "august": 8, "sep": 9, "september": 9, "oct": 10, "october": 10,
+            "aug": 8, "august": 8, "sep": 9, "sept": 9, "september": 9, "oct": 10, "october": 10,
             "nov": 11, "november": 11, "dec": 12, "december": 12,
         }
+
+        # Single date: "16 Sept 2026", "16 September 2026", "16th September 2026"
+        single_day_match = re.search(
+            r"\b(\d{1,2})(?:st|nd|rd|th)?\s+(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+(\d{4})\b",
+            t,
+        )
+        if single_day_match:
+            d_num = int(single_day_match.group(1))
+            m_name = single_day_match.group(2).lower()
+            year = int(single_day_match.group(3))
+            month_num = month_map.get(m_name, 9)
+            start = date(year, month_num, d_num)
+            end = start
+            assumption = f"Interpreted '{text}' as {d_num} {m_name.capitalize()} {year}: {_fmt(start)} to {_fmt(end)}"
+            return start, end, assumption
+
+        # Single date: "Sept 16 2026", "September 16, 2026"
+        single_day_rev_match = re.search(
+            r"\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+(\d{1,2})(?:st|nd|rd|th)?(?:,)?\s+(\d{4})\b",
+            t,
+        )
+        if single_day_rev_match:
+            m_name = single_rev = single_day_rev_match.group(1).lower()
+            d_num = int(single_day_rev_match.group(2))
+            year = int(single_day_rev_match.group(3))
+            month_num = month_map.get(m_name, 9)
+            start = date(year, month_num, d_num)
+            end = start
+            assumption = f"Interpreted '{text}' as {d_num} {m_name.capitalize()} {year}: {_fmt(start)} to {_fmt(end)}"
+            return start, end, assumption
+
+        # Single ISO date: "2026-09-16"
+        single_iso = re.search(r"\b(\d{4}-\d{2}-\d{2})\b", t)
+        if single_iso:
+            start = date.fromisoformat(single_iso.group(1))
+            end = start
+            assumption = f"Interpreted '{text}' as {_fmt(start)}"
+            return start, end, assumption
+
+        # Month expressions: "September 2026", "aug 2026"
         month_match = re.search(
-            r"\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+(\d{4})\b",
+            r"\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+(\d{4})\b",
             t,
         )
         if month_match:

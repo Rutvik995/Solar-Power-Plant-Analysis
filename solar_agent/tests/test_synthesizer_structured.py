@@ -342,7 +342,7 @@ def test_format_table_cell_with_array_and_multiple_tools():
 
     # Multi-element list
     res_list = format_table_cell(["detect_zero_generation_tool", "detect_anomalies_tool"], "flagged_by")
-    assert res_list == "Zero-generation check, Unusual-reading check"
+    assert res_list == "No power produced, Unusual readings"
 
     # Multi-element numpy array
     res_arr = format_table_cell(np.array(["tool_a", "tool_b"]), "flagged_by")
