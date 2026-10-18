@@ -78,6 +78,21 @@ export async function fetchDashboardHeatmapMatrix({ plantId, start, end } = {}) 
 }
 
 /**
+ * Fetch per-inverter telemetry detail and block peer median.
+ */
+export async function fetchDashboardInverterDetail({ inverterId, start, end, agg = 'day' } = {}) {
+  if (!inverterId) return null;
+  const params = new URLSearchParams();
+  if (start) params.append('start', start);
+  if (end) params.append('end', end);
+  if (agg) params.append('agg', agg);
+
+  const qs = params.toString() ? `?${params.toString()}` : '';
+  const res = await fetch(`${BASE_URL}/dashboard/inverter/${encodeURIComponent(inverterId)}${qs}`);
+  return handleResponse(res);
+}
+
+/**
  * Fetch dashboard KPIs (legacy helper).
  */
 export async function fetchDashboardKpis({ plantId, start, end } = {}) {

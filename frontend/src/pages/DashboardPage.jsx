@@ -4,7 +4,6 @@ import { useQuery } from '@tanstack/react-query';
 import {
   fetchMeta,
   fetchDashboardOverview,
-  fetchDashboardPlantDetail,
 } from '../services/api';
 
 import Card from '../components/common/Card';
@@ -12,6 +11,7 @@ import KpiCard from '../components/common/KpiCard';
 import Badge from '../components/common/Badge';
 import Skeleton from '../components/common/Skeleton';
 import ErrorCard from '../components/common/ErrorCard';
+import PlantDetailView from '../components/dashboard/PlantDetailView';
 
 import {
   Zap,
@@ -160,21 +160,6 @@ export default function DashboardPage() {
   } = useQuery({
     queryKey: ['dashboard', 'overview', queryParams],
     queryFn: () => fetchDashboardOverview(queryParams),
-  });
-
-  // Plant Detail Query (runs when activeTab is 'plant' and a plant is chosen)
-  const isPlantDetailActive = activeTab === 'plant';
-  const effectivePlantId = selectedPlant !== 'all' ? selectedPlant : null;
-
-  const {
-    data: plantDetail,
-    isLoading: plantDetailLoading,
-    error: plantDetailError,
-    refetch: refetchPlantDetail,
-  } = useQuery({
-    queryKey: ['dashboard', 'plant', { ...queryParams, plantId: effectivePlantId }],
-    queryFn: () => fetchDashboardPlantDetail({ ...queryParams, plantId: effectivePlantId }),
-    enabled: isPlantDetailActive && Boolean(effectivePlantId),
   });
 
   // Sorting for plants ranking table
@@ -874,294 +859,14 @@ export default function DashboardPage() {
 
       {/* PLANT DETAIL TAB CONTENT */}
       {activeTab === 'plant' && (
-        <div className="space-y-6">
-          {/* Prompt if all plants selected */}
-          {selectedPlant === 'all' ? (
-            <Card className="text-center py-10">
-              <Building2 className="w-10 h-10 text-[#2563EB] mx-auto mb-3" />
-              <h3 className="text-base font-bold text-[#0F172A]">Select a Plant for In-Depth Detail</h3>
-              <p className="text-xs text-[#64748B] max-w-md mx-auto mt-1 mb-5">
-                Detailed block PRs, inverter leaderboards, ambient weather correlations, and treemap
-                hierarchies require focusing on a specific plant.
-              </p>
-              <div className="flex flex-wrap justify-center gap-2">
-                {meta?.plants?.map((p) => (
-                  <button
-                    key={p.id}
-                    type="button"
-                    onClick={() => updateFilters({ plant: p.id })}
-                    className="px-4 py-2 bg-white border border-[#2563EB]/30 hover:border-[#2563EB] hover:bg-[#EFF6FF] text-[#2563EB] font-medium text-xs rounded-lg transition-colors flex items-center gap-2"
-                  >
-                    <span>{p.name || `Plant ${p.id}`}</span>
-                    <span className="text-[#64748B] text-[11px]">({p.capacity_mwp} MWp)</span>
-                  </button>
-                ))}
-              </div>
-            </Card>
-          ) : plantDetailError ? (
-            <ErrorCard
-              title="Failed to load Plant Detail"
-              message={plantDetailError.message}
-              onRetry={refetchPlantDetail}
-            />
-          ) : (
-            <>
-              {/* Plant Detail Header Banner */}
-              <div className="bg-white border border-[#E2E8F0] rounded-xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-xs">
-                <div className="flex items-center gap-3">
-                  <div className="w-10 h-10 rounded-lg bg-[#EFF6FF] border border-[#2563EB]/20 flex items-center justify-center text-[#2563EB] font-bold text-sm">
-                    P{selectedPlant}
-                  </div>
-                  <div>
-                    <h2 className="text-base font-bold text-[#0F172A]">
-                      {meta?.plants?.find((p) => String(p.id) === String(selectedPlant))?.name ||
-                        `Plant ${selectedPlant}`}
-                    </h2>
-                    <p className="text-xs text-[#64748B]">
-                      Capacity:{' '}
-                      {meta?.plants?.find((p) => String(p.id) === String(selectedPlant))?.capacity_mwp ||
-                        '—'}{' '}
-                      MWp • Range: {startDate} to {endDate}
-                    </p>
-                  </div>
-                </div>
-
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => updateFilters({ tab: 'overview', plant: 'all' })}
-                    className="px-3 py-1.5 text-xs font-medium text-[#64748B] hover:text-[#0F172A] bg-[#F8FAFC] hover:bg-[#F1F5F9] rounded-lg border border-[#E2E8F0] transition-colors"
-                  >
-                    ← Back to Fleet Overview
-                  </button>
-                </div>
-              </div>
-
-              {/* Block PR Table & Best/Worst Inverters Grid */}
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                {/* Block PR Table */}
-                <Card title="Block Performance" subtitle="PR and yield aggregated by physical block">
-                  {plantDetailLoading ? (
-                    <div className="space-y-2 pt-2">
-                      <Skeleton className="w-full h-8" />
-                      <Skeleton className="w-full h-8" />
-                    </div>
-                  ) : !plantDetail?.blocks || plantDetail.blocks.length === 0 ? (
-                    <p className="text-xs text-[#64748B] py-6 text-center">No block telemetry available.</p>
-                  ) : (
-                    <div className="overflow-x-auto">
-                      <table className="w-full text-left text-xs border-collapse">
-                        <thead>
-                          <tr className="border-b border-[#E2E8F0] text-[#64748B]">
-                            <th className="py-2 px-2 font-semibold">Block</th>
-                            <th className="py-2 px-2 font-semibold">Inverters</th>
-                            <th className="py-2 px-2 font-semibold">Energy</th>
-                            <th className="py-2 px-2 font-semibold text-right">PR</th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-[#E2E8F0]">
-                          {plantDetail.blocks.map((b) => (
-                            <tr key={b.block_id || b.block}>
-                              <td className="py-2.5 px-2 font-medium text-[#0F172A]">{b.block}</td>
-                              <td className="py-2.5 px-2 text-[#64748B]">{b.inverter_count} units</td>
-                              <td className="py-2.5 px-2 text-[#0F172A]">
-                                {b.energy_mwh !== null ? `${b.energy_mwh} MWh` : '—'}
-                              </td>
-                              <td className="py-2.5 px-2 text-right font-semibold text-[#0D9488]">
-                                {b.pr !== null ? `${(b.pr * 100).toFixed(1)}%` : '—'}
-                              </td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  )}
-                </Card>
-
-                {/* Best & Worst Inverters */}
-                <Card
-                  title="Inverter Leaderboard"
-                  subtitle="Top 5 best & worst performers by Performance Ratio"
-                >
-                  {plantDetailLoading ? (
-                    <div className="space-y-2 pt-2">
-                      <Skeleton className="w-full h-12" />
-                      <Skeleton className="w-full h-12" />
-                    </div>
-                  ) : (
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                      {/* Best */}
-                      <div className="border border-[#16A34A]/20 bg-[#F0FDF4]/50 rounded-lg p-3">
-                        <span className="text-xs font-bold text-[#16A34A] block mb-2">
-                          Top 5 Inverters
-                        </span>
-                        <div className="space-y-1.5">
-                          {plantDetail?.inverters_best?.map((inv) => (
-                            <div
-                              key={inv.inverter_id}
-                              className="flex items-center justify-between text-xs py-1 border-b border-[#16A34A]/10 last:border-0"
-                            >
-                              <span className="font-medium text-[#0F172A]">{inv.inverter_id}</span>
-                              <span className="font-bold text-[#16A34A]">
-                                {inv.pr !== null ? `${(inv.pr * 100).toFixed(1)}%` : '—'}
-                              </span>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-
-                      {/* Worst */}
-                      <div className="border border-[#DC2626]/20 bg-[#FEF2F2]/50 rounded-lg p-3">
-                        <span className="text-xs font-bold text-[#DC2626] block mb-2">
-                          Bottom 5 Inverters
-                        </span>
-                        <div className="space-y-1.5">
-                          {plantDetail?.inverters_worst?.map((inv) => (
-                            <div
-                              key={inv.inverter_id}
-                              className="flex items-center justify-between text-xs py-1 border-b border-[#DC2626]/10 last:border-0"
-                            >
-                              <span className="font-medium text-[#0F172A]">{inv.inverter_id}</span>
-                              <span className="font-bold text-[#DC2626]">
-                                {inv.pr !== null ? `${(inv.pr * 100).toFixed(1)}%` : '—'}
-                              </span>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    </div>
-                  )}
-                </Card>
-              </div>
-
-              {/* Weather Telemetry Trend */}
-              <Card
-                title="Weather & Panel Telemetry"
-                subtitle="Ambient temp, module surface temp, and soiling ratio over time"
-              >
-                {plantDetailLoading ? (
-                  <Skeleton className="h-64" />
-                ) : !plantDetail?.weather || plantDetail.weather.length === 0 ? (
-                  <p className="text-xs text-[#64748B] py-8 text-center">No weather logs available.</p>
-                ) : (
-                  <div className="h-64 w-full pt-2">
-                    <ResponsiveContainer width="100%" height="100%">
-                      <ComposedChart
-                        data={plantDetail.weather}
-                        margin={{ top: 10, right: 30, left: 10, bottom: 5 }}
-                      >
-                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#E2E8F0" />
-                        <XAxis
-                          dataKey="date"
-                          tick={{ fontSize: 11, fill: '#64748B' }}
-                          stroke="#E2E8F0"
-                        />
-                        <YAxis
-                          yAxisId="temp"
-                          unit="°C"
-                          tick={{ fontSize: 11, fill: '#64748B' }}
-                          stroke="#E2E8F0"
-                        />
-                        <YAxis
-                          yAxisId="soiling"
-                          orientation="right"
-                          domain={[0.8, 1.0]}
-                          tick={{ fontSize: 11, fill: '#7C3AED' }}
-                          stroke="#7C3AED"
-                        />
-                        <Tooltip
-                          content={({ active, payload, label }) => {
-                            if (!active || !payload?.length) return null;
-                            return (
-                              <div className="bg-white border border-[#E2E8F0] shadow-md rounded-lg p-2.5 text-xs">
-                                <p className="font-semibold text-[#0F172A] mb-1">{label}</p>
-                                {payload.map((p) => (
-                                  <p key={p.dataKey} style={{ color: p.color }}>
-                                    {p.name}: {p.value}
-                                  </p>
-                                ))}
-                              </div>
-                            );
-                          }}
-                        />
-                        <Legend verticalAlign="top" align="right" wrapperStyle={{ fontSize: 12 }} />
-                        <Line
-                          yAxisId="temp"
-                          type="monotone"
-                          dataKey="ambient_c"
-                          name="Ambient (°C)"
-                          stroke="#2563EB"
-                          strokeWidth={1.5}
-                          dot={false}
-                        />
-                        <Line
-                          yAxisId="temp"
-                          type="monotone"
-                          dataKey="module_c"
-                          name="Module Temp (°C)"
-                          stroke="#D97706"
-                          strokeWidth={1.5}
-                          dot={false}
-                        />
-                        <Line
-                          yAxisId="soiling"
-                          type="monotone"
-                          dataKey="soiling_ratio"
-                          name="Soiling Ratio"
-                          stroke="#7C3AED"
-                          strokeWidth={2}
-                          dot={false}
-                        />
-                      </ComposedChart>
-                    </ResponsiveContainer>
-                  </div>
-                )}
-              </Card>
-
-              {/* Inverter Treemap / Hierarchy Grid */}
-              <Card
-                title="Inverter Fleet Grid"
-                subtitle="All inverters grouped by block with rated DC capacity and PR"
-              >
-                {plantDetailLoading ? (
-                  <Skeleton className="h-48" />
-                ) : !plantDetail?.treemap || plantDetail.treemap.length === 0 ? (
-                  <p className="text-xs text-[#64748B] py-6 text-center">No inverter details found.</p>
-                ) : (
-                  <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8 gap-2.5 pt-2">
-                    {plantDetail.treemap.map((inv) => {
-                      const prVal = inv.pr !== null ? inv.pr * 100 : null;
-                      let bgStatus = 'bg-[#F0FDF4] border-[#16A34A]/30 text-[#16A34A]';
-                      if (prVal === null || prVal === 0) {
-                        bgStatus = 'bg-[#FEF2F2] border-[#DC2626]/30 text-[#DC2626]';
-                      } else if (prVal < 80) {
-                        bgStatus = 'bg-[#FFFBEB] border-[#D97706]/30 text-[#D97706]';
-                      }
-
-                      return (
-                        <div
-                          key={`${inv.block}_${inv.inverter}`}
-                          className={`border rounded-lg p-2 flex flex-col justify-between text-xs ${bgStatus}`}
-                        >
-                          <span className="font-semibold text-[#0F172A] truncate">
-                            {inv.inverter}
-                          </span>
-                          <span className="text-[10px] text-[#64748B] truncate">{inv.block}</span>
-                          <div className="mt-2 flex items-baseline justify-between font-bold">
-                            <span>{prVal !== null ? `${prVal.toFixed(1)}%` : '0%'}</span>
-                            <span className="text-[10px] font-normal text-[#64748B]">
-                              {inv.rated_dc_kw}kW
-                            </span>
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </Card>
-            </>
-          )}
-        </div>
+        <PlantDetailView
+          plantId={selectedPlant}
+          startDate={startDate}
+          endDate={endDate}
+          agg={agg}
+          plantsMeta={meta?.plants || []}
+          onSelectPlant={(pid) => updateFilters({ plant: pid, tab: 'plant' })}
+        />
       )}
     </div>
   );

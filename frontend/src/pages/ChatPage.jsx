@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react';
-import { useOutletContext, useParams, useNavigate } from 'react-router-dom';
+import { useOutletContext, useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -97,6 +97,15 @@ export default function ChatPage() {
 
   const messagesEndRef = useRef(null);
   const pollIntervalRef = useRef(null);
+  const [searchParams] = useSearchParams();
+
+  // Populate prompt input from query parameter ?prefill=... without auto-sending
+  useEffect(() => {
+    const prefillQuery = searchParams.get('prefill');
+    if (prefillQuery) {
+      setInput(prefillQuery);
+    }
+  }, [searchParams]);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
