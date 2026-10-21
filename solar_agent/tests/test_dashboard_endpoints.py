@@ -306,3 +306,47 @@ def test_health_values():
         assert p["health"] in ("green", "amber", "red"), (
             f"plant {p['plant_id']} health={p['health']!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# 18. Weather non-null test for Plant 1: ambient_c, module_c, irradiance
+# ---------------------------------------------------------------------------
+
+def test_plant1_weather_non_null():
+    data = plant(1)
+    weather = data.get("weather", [])
+    assert len(weather) > 0, "Weather list should not be empty for Plant 1"
+    for row in weather:
+        assert row["ambient_c"] is not None, f"ambient_c is null in {row}"
+        assert row["module_c"] is not None, f"module_c is null in {row}"
+        assert row["irradiance"] is not None, f"irradiance is null in {row}"
+
+
+# ---------------------------------------------------------------------------
+# 19. Leaderboard: bottom 5 sorted ascending by PR, ties broken by name
+# ---------------------------------------------------------------------------
+
+def test_plant1_leaderboard_sorting():
+    data = plant(1)
+    worst = data.get("inverters_worst", [])
+    assert len(worst) <= 5
+    for i in range(len(worst) - 1):
+        # PR ascending
+        assert worst[i]["pr"] <= worst[i + 1]["pr"]
+        if worst[i]["pr"] == worst[i + 1]["pr"]:
+            # Tie break by name ascending
+            assert worst[i]["inverter_id"] <= worst[i + 1]["inverter_id"]
+
+
+# ---------------------------------------------------------------------------
+# 20. Overview previous period metadata
+# ---------------------------------------------------------------------------
+
+def test_overview_previous_period():
+    data = ov(start="2026-09-01", end="2026-09-26")
+    prev = data.get("previous_period")
+    assert prev is not None
+    assert "days_covered" in prev
+    assert "days_expected" in prev
+    assert "has_data" in prev
+

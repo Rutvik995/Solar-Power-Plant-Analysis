@@ -153,6 +153,14 @@ export default function ChatPage() {
         localStorage.setItem('solar_last_session_id', sessionId);
         await reloadMessages(sessionId);
       } else {
+        const prefillParam = searchParams.get('prefill');
+        if (prefillParam) {
+          if (isMounted) {
+            setMessages([]);
+            setSelectedMessageId(null);
+          }
+          return;
+        }
         const lastSid = localStorage.getItem('solar_last_session_id');
         if (lastSid) {
           try {

@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
-import { fetchDashboardInverterDetail } from '../../services/api';
+import { fetchDashboardInverterDetail, createSession } from '../../services/api';
 
 import Badge from '../common/Badge';
 import Skeleton from '../common/Skeleton';
@@ -99,8 +99,8 @@ export default function InverterDrawer({
     return flagged ? flagged.date : null;
   }, [daily]);
 
-  // Formulate AI prompt
-  const handleAskAI = () => {
+  // Formulate AI prompt and always create a new chat session
+  const handleAskAI = async () => {
     let question = `Explain why inverter ${inverterId} in ${summary?.block || 'Plant'} `;
     if (worstFaultDate) {
       // Format to e.g. "16 Sep 2026"
@@ -112,11 +112,24 @@ export default function InverterDrawer({
         question += `failed on ${worstFaultDate}.`;
       }
     } else if (summary?.flagged_days && summary.flagged_days > 0) {
-      question += `experienced ${summary.flagged_days} flagged anomaly days between ${startDate} and ${endDate}.`;
+      const daysText = summary.flagged_days === 1 ? '1 flagged day' : `${summary.flagged_days} flagged days`;
+      question += `experienced ${daysText} between ${startDate} and ${endDate}.`;
     } else {
       question += `performance ratio deviated from its block peers during ${startDate} to ${endDate}.`;
     }
 
+    try {
+      const newSession = await createSession({ title: `Inverter ${inverterId} Analysis` });
+      if (newSession?.id) {
+        localStorage.setItem('solar_last_session_id', newSession.id);
+        navigate(`/chat/${newSession.id}?prefill=${encodeURIComponent(question)}`);
+        return;
+      }
+    } catch (err) {
+      console.error('Failed to create new chat session from drawer:', err);
+    }
+
+    localStorage.removeItem('solar_last_session_id');
     navigate(`/chat?prefill=${encodeURIComponent(question)}`);
   };
 
@@ -192,7 +205,9 @@ export default function InverterDrawer({
                 <div className="flex items-center justify-between text-xs pt-1 border-t border-[#E2E8F0]">
                   <span className="text-[#64748B]">Flagged Days</span>
                   <Badge variant={summary?.flagged_days > 0 ? 'danger' : 'success'}>
-                    {summary?.flagged_days || 0} anomaly days
+                    {summary?.flagged_days === 1
+                      ? '1 flagged day'
+                      : `${summary?.flagged_days || 0} flagged days`}
                   </Badge>
                 </div>
               </div>

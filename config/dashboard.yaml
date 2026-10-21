@@ -5,6 +5,11 @@ health:
   amber_threshold_pp: 3.0   # PR more than 3 pp below fleet median → amber
   red_threshold_pp: 8.0     # PR more than 8 pp below fleet median → red
 
+# Leaderboard & block highlight threshold (percentage points below plant median PR)
+leaderboard:
+  underperformance_threshold_pp: 3.0
+
+
 # Availability definition:
 # An inverter-day counts as "available" when:
 #   - irradiance > low_irradiance_threshold  (same as min_irradiance_kwh_m2 in settings)

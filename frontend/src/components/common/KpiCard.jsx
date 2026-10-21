@@ -122,7 +122,7 @@ export default function KpiCard({
             <span className="text-[#64748B]">vs prev</span>
           </div>
         ) : (
-          <span className="text-[#64748B] text-[11px]">No previous period</span>
+          <span />
         )}
 
         {sparklineData && sparklineData.length > 1 && (

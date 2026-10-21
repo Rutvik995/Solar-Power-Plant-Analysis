@@ -157,26 +157,25 @@ export default function PlantDetailView({
     enabled: isPlantSelected,
   });
 
-  // Identify weakest block (highlighted in danger color #DC2626)
-  const { blocksData, weakestBlockId } = useMemo(() => {
+  // Plant median PR (for underperformance comparison)
+  const plantMedianPr = plantDetail?.plant_median_pr;
+
+  // Blocks data with underperformance highlight (> 3 pp below plant median)
+  const blocksData = useMemo(() => {
     const rawBlocks = plantDetail?.blocks || [];
-    let minPr = Infinity;
-    let weakestId = null;
-
-    rawBlocks.forEach((b) => {
-      if (b.pr !== null && b.pr !== undefined && b.pr < minPr) {
-        minPr = b.pr;
-        weakestId = b.block_id || b.block;
-      }
+    return rawBlocks.map((b) => {
+      const prPct = b.pr !== null && b.pr !== undefined ? Number((b.pr * 100).toFixed(2)) : 0;
+      const isUnder = b.is_underperforming ?? (
+        plantMedianPr !== null && plantMedianPr !== undefined && b.pr !== null &&
+        ((plantMedianPr - b.pr) * 100 > 3.0)
+      );
+      return {
+        ...b,
+        pr_pct: prPct,
+        is_red: Boolean(isUnder),
+      };
     });
-
-    const formatted = rawBlocks.map((b) => ({
-      ...b,
-      pr_pct: b.pr !== null && b.pr !== undefined ? Number((b.pr * 100).toFixed(1)) : 0,
-    }));
-
-    return { blocksData: formatted, weakestBlockId: weakestId };
-  }, [plantDetail?.blocks]);
+  }, [plantDetail?.blocks, plantMedianPr]);
 
   // Transform Treemap data: hierarchy [ { name: block, children: [ { name: inv, size: rated_dc, pr } ] } ]
   const treemapHierarchy = useMemo(() => {
@@ -206,6 +205,28 @@ export default function PlantDetailView({
   const currentPlant = useMemo(() => {
     return plantsMeta.find((p) => String(p.id) === String(plantId));
   }, [plantsMeta, plantId]);
+
+  // Bottom 5 inverters: sorted ascending by PR, breaking ties by inverter_id name
+  const worstInverters = useMemo(() => {
+    const list = [...(plantDetail?.inverters_worst || [])];
+    list.sort((a, b) => {
+      const prA = a.pr ?? 0;
+      const prB = b.pr ?? 0;
+      if (prA !== prB) return prA - prB;
+      return String(a.inverter_id).localeCompare(String(b.inverter_id));
+    });
+    return list;
+  }, [plantDetail?.inverters_worst]);
+
+  const anyWorstRed = useMemo(() => {
+    return worstInverters.some((inv) => {
+      if (inv.is_underperforming) return true;
+      if (plantMedianPr !== null && plantMedianPr !== undefined && inv.pr !== null) {
+        return (plantMedianPr - inv.pr) * 100 > 3.0;
+      }
+      return false;
+    });
+  }, [worstInverters, plantMedianPr]);
 
   // Handler for opening inverter drawer
   const handleOpenDrawer = (invId) => {
@@ -292,7 +313,7 @@ export default function PlantDetailView({
             {/* Block PR Bars */}
             <Card
               title="Block Performance Ratio (PR)"
-              subtitle="Weakest block highlighted in danger red (#DC2626)"
+              subtitle="Weakest block highlighted in danger red"
             >
               {isLoading ? (
                 <Skeleton className="h-60" />
@@ -325,15 +346,15 @@ export default function PlantDetailView({
                         content={({ active, payload }) => {
                           if (!active || !payload?.length) return null;
                           const b = payload[0].payload;
-                          const isWeakest = (b.block_id || b.block) === weakestBlockId;
+                          const isRed = b.is_red;
                           return (
                             <div className="bg-white border border-[#E2E8F0] shadow-md rounded-lg p-2.5 text-xs">
                               <p className="font-semibold text-[#0F172A]">{b.block}</p>
                               <p
                                 className="font-bold mt-1"
-                                style={{ color: isWeakest ? '#DC2626' : '#0D9488' }}
+                                style={{ color: isRed ? '#DC2626' : '#0D9488' }}
                               >
-                                PR: {b.pr_pct}% {isWeakest && '(Weakest Block)'}
+                                PR: {b.pr_pct}% {isRed && '(>3pp below median)'}
                               </p>
                               <p className="text-[#64748B]">Energy: {b.energy_mwh} MWh</p>
                               <p className="text-[#64748B]">Inverters: {b.inverter_count} units</p>
@@ -342,15 +363,12 @@ export default function PlantDetailView({
                         }}
                       />
                       <Bar dataKey="pr_pct" radius={[0, 4, 4, 0]}>
-                        {blocksData.map((entry) => {
-                          const isWeakest = (entry.block_id || entry.block) === weakestBlockId;
-                          return (
-                            <Cell
-                              key={entry.block_id || entry.block}
-                              fill={isWeakest ? '#DC2626' : '#0D9488'}
-                            />
-                          );
-                        })}
+                        {blocksData.map((entry) => (
+                          <Cell
+                            key={entry.block_id || entry.block}
+                            fill={entry.is_red ? '#DC2626' : '#0D9488'}
+                          />
+                        ))}
                       </Bar>
                     </BarChart>
                   </ResponsiveContainer>
@@ -379,7 +397,7 @@ export default function PlantDetailView({
                       </div>
                       <div className="space-y-2.5">
                         {plantDetail?.inverters_best?.map((inv) => {
-                          const pct = inv.pr !== null ? (inv.pr * 100).toFixed(1) : 0;
+                          const pct = inv.pr !== null ? (inv.pr * 100).toFixed(2) : '0.00';
                           return (
                             <div
                               key={inv.inverter_id}
@@ -398,7 +416,7 @@ export default function PlantDetailView({
                               <div className="w-full bg-slate-200 h-1.5 rounded-full overflow-hidden">
                                 <div
                                   className="bg-[#16A34A] h-full rounded-full transition-all"
-                                  style={{ width: `${Math.min(100, Math.max(0, pct))}%` }}
+                                  style={{ width: `${Math.min(100, Math.max(0, Number(pct)))}%` }}
                                 />
                               </div>
                             </div>
@@ -408,16 +426,28 @@ export default function PlantDetailView({
                     </div>
                   </div>
 
-                  {/* Worst 5 */}
-                  <div className="border border-[#DC2626]/20 bg-[#FEF2F2]/40 rounded-xl p-3 flex flex-col justify-between">
+                  {/* Worst 5: Sorted ascending by PR, ties broken by name */}
+                  <div
+                    className={`border rounded-xl p-3 flex flex-col justify-between ${
+                      anyWorstRed ? 'border-[#DC2626]/20 bg-[#FEF2F2]/40' : 'border-[#E2E8F0] bg-[#F8FAFC]'
+                    }`}
+                  >
                     <div>
-                      <div className="flex items-center gap-1.5 text-xs font-bold text-[#DC2626] mb-3">
-                        <TrendingDown className="w-4 h-4 text-[#DC2626]" />
+                      <div
+                        className={`flex items-center gap-1.5 text-xs font-bold mb-3 ${
+                          anyWorstRed ? 'text-[#DC2626]' : 'text-[#64748B]'
+                        }`}
+                      >
+                        <TrendingDown className={`w-4 h-4 ${anyWorstRed ? 'text-[#DC2626]' : 'text-[#64748B]'}`} />
                         <span>Bottom 5 Inverters</span>
                       </div>
                       <div className="space-y-2.5">
-                        {plantDetail?.inverters_worst?.map((inv) => {
-                          const pct = inv.pr !== null ? (inv.pr * 100).toFixed(1) : 0;
+                        {worstInverters.map((inv) => {
+                          const pct = inv.pr !== null ? (inv.pr * 100).toFixed(2) : '0.00';
+                          const isRed = inv.is_underperforming ?? (
+                            plantMedianPr !== null && plantMedianPr !== undefined && inv.pr !== null &&
+                            ((plantMedianPr - inv.pr) * 100 > 3.0)
+                          );
                           return (
                             <div
                               key={inv.inverter_id}
@@ -429,14 +459,14 @@ export default function PlantDetailView({
                                 <span className="font-semibold text-[#0F172A] group-hover:text-[#2563EB] truncate">
                                   {inv.inverter_id}
                                 </span>
-                                <span className="font-bold text-[#DC2626] shrink-0 ml-1">
+                                <span className={`font-bold shrink-0 ml-1 ${isRed ? 'text-[#DC2626]' : 'text-[#64748B]'}`}>
                                   {pct}%
                                 </span>
                               </div>
                               <div className="w-full bg-slate-200 h-1.5 rounded-full overflow-hidden">
                                 <div
-                                  className="bg-[#DC2626] h-full rounded-full transition-all"
-                                  style={{ width: `${Math.min(100, Math.max(0, pct))}%` }}
+                                  className={`h-full rounded-full transition-all ${isRed ? 'bg-[#DC2626]' : 'bg-[#94A3B8]'}`}
+                                  style={{ width: `${Math.min(100, Math.max(0, Number(pct)))}%` }}
                                 />
                               </div>
                             </div>
@@ -535,7 +565,7 @@ export default function PlantDetailView({
                       <Legend verticalAlign="top" align="right" wrapperStyle={{ fontSize: 11 }} />
                       <Line
                         type="monotone"
-                        dataKey="avg_ambient_temp_c"
+                        dataKey="ambient_c"
                         name="Ambient Temp"
                         stroke="#2563EB"
                         strokeWidth={2}
@@ -543,7 +573,7 @@ export default function PlantDetailView({
                       />
                       <Line
                         type="monotone"
-                        dataKey="max_module_temp_c"
+                        dataKey="module_c"
                         name="Module Temp"
                         stroke="#D97706"
                         strokeWidth={2}
@@ -608,7 +638,7 @@ export default function PlantDetailView({
                       <Line
                         yAxisId="irr"
                         type="monotone"
-                        dataKey="total_solar_radiation_kwh_m2"
+                        dataKey="irradiance"
                         name="Irradiance (kWh/m²)"
                         stroke="#D97706"
                         strokeWidth={2}

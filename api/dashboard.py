@@ -53,6 +53,9 @@ with open(_DASH_YAML, "r", encoding="utf-8") as _fh:
 
 HEALTH_AMBER_PP: float = float(_DCFG["health"]["amber_threshold_pp"])
 HEALTH_RED_PP: float = float(_DCFG["health"]["red_threshold_pp"])
+LEADERBOARD_UNDERPERF_PP: float = float(
+    _DCFG.get("leaderboard", {}).get("underperformance_threshold_pp", 3.0)
+)
 CACHE_TTL: int = int(_DCFG["cache_ttl_seconds"])
 HEATMAP_MAX_DAYS: int = int(_DCFG["heatmap"]["max_days"])
 SPARKLINE_MAX: int = int(_DCFG["sparkline"]["max_points"])
@@ -341,8 +344,27 @@ def dashboard_overview(
     prev_start = prev_end - timedelta(days=n_days - 1)
     db_min = q.get_min_log_date()
     prev_df = pd.DataFrame()
+    prev_days_covered = 0
     if prev_end >= db_min:
-        prev_df = q.fetch_inverter_daily(max(db_min, prev_start), prev_end, plant_ids=plant_ids)
+        eff_prev_start = max(db_min, prev_start)
+        prev_df = q.fetch_inverter_daily(eff_prev_start, prev_end, plant_ids=plant_ids)
+        prev_days_covered = (prev_end - eff_prev_start).days + 1
+
+    prev_note = None
+    if 0 < prev_days_covered < n_days:
+        prev_note = f"previous period covers {prev_days_covered} of {n_days} days"
+    elif prev_days_covered == 0:
+        prev_note = "No earlier data for this range"
+
+    previous_period = {
+        "start": _iso(max(db_min, prev_start)) if prev_days_covered > 0 else None,
+        "end": _iso(prev_end) if prev_days_covered > 0 else None,
+        "days_covered": prev_days_covered,
+        "days_expected": n_days,
+        "is_partial": bool(0 < prev_days_covered < n_days),
+        "has_data": bool(prev_days_covered > 0),
+        "note": prev_note,
+    }
 
     # ---- compute current and previous scalar KPIs ----
     def _all_kpis(d: pd.DataFrame) -> dict:
@@ -440,6 +462,7 @@ def dashboard_overview(
 
     result = {
         "period": {"start": _iso(start_date), "end": _iso(end_date)},
+        "previous_period": previous_period,
         "clamped_note": clamped_note,
         "kpis": kpis,
         "fleet_pr": fleet_pr_val,
@@ -487,6 +510,11 @@ def dashboard_plant(
         _cache_set(ck, result)
         return result
 
+    # ---- calculate plant median PR across inverters ----
+    inv_agg = m.aggregate_pr(df, ["inverter_id", "block_id", "block_name"])
+    inv_clean = inv_agg.dropna(subset=["performance_ratio"])
+    plant_median_pr = _safe_float(inv_clean["performance_ratio"].median(), 4) if not inv_clean.empty else None
+
     # ---- blocks ----
     block_agg = m.aggregate_pr(df, ["block_id", "block_name", "plant_id"])
     inv_count = df.groupby("block_id")["inverter_id"].nunique().rename("inverter_count")
@@ -494,32 +522,45 @@ def dashboard_plant(
     block_agg = block_agg.join(inv_count, on="block_id")
     block_agg = block_agg.join(block_energy.rename("energy_mwh"), on="block_id")
 
-    blocks_out = [
-        {
+    blocks_out = []
+    for _, row in block_agg.iterrows():
+        b_pr = _safe_float(row["performance_ratio"], 4)
+        b_under = False
+        if plant_median_pr is not None and b_pr is not None:
+            b_under = ((plant_median_pr - b_pr) * 100) > LEADERBOARD_UNDERPERF_PP
+        blocks_out.append({
             "block": str(row.get("block_name", row["block_id"])),
             "block_id": str(row["block_id"]),
-            "pr": _safe_float(row["performance_ratio"], 4),
+            "pr": b_pr,
             "energy_mwh": _safe_float(row.get("energy_mwh"), 3),
             "inverter_count": int(row["inverter_count"]) if pd.notna(row.get("inverter_count")) else 0,
-        }
-        for _, row in block_agg.iterrows()
-    ]
+            "is_underperforming": b_under,
+        })
 
     # ---- best/worst inverters by PR ----
-    inv_agg = m.aggregate_pr(df, ["inverter_id", "block_id", "block_name"])
-    inv_clean = inv_agg.dropna(subset=["performance_ratio"]).sort_values(
-        "performance_ratio", ascending=False, na_position="last"
-    )
+    # Best 5: highest PR first, break ties by inverter_id
+    inv_best_df = inv_clean.sort_values(
+        by=["performance_ratio", "inverter_id"], ascending=[False, True]
+    ).head(5)
+    # Bottom 5: lowest PR first (ascending), break ties by inverter_id
+    inv_worst_df = inv_clean.sort_values(
+        by=["performance_ratio", "inverter_id"], ascending=[True, True]
+    ).head(5)
 
     def _inv_row(row: pd.Series) -> dict:
+        pr_val = _safe_float(row["performance_ratio"], 4)
+        is_under = False
+        if plant_median_pr is not None and pr_val is not None:
+            is_under = ((plant_median_pr - pr_val) * 100) > LEADERBOARD_UNDERPERF_PP
         return {
             "inverter_id": str(row["inverter_id"]),
             "block": str(row.get("block_name", row["block_id"])),
-            "pr": _safe_float(row["performance_ratio"], 4),
+            "pr": pr_val,
+            "is_underperforming": is_under,
         }
 
-    inverters_best = [_inv_row(r) for _, r in inv_clean.head(5).iterrows()]
-    inverters_worst = [_inv_row(r) for _, r in inv_clean.tail(5).iterrows()]
+    inverters_best = [_inv_row(r) for _, r in inv_best_df.iterrows()]
+    inverters_worst = [_inv_row(r) for _, r in inv_worst_df.iterrows()]
 
     # ---- weather series ----
     weather_df = q.fetch_weather_daily(start_date, end_date, plant_ids=[plant_id_path])
@@ -532,6 +573,10 @@ def dashboard_plant(
                 "module_c": _safe_float(row.get("max_module_temp_c"), 2),
                 "irradiance": _safe_float(row.get("total_solar_radiation_kwh_m2"), 3),
                 "soiling_ratio": _safe_float(row.get("soiling_ratio"), 4),
+                # Aliases for backward compatibility:
+                "avg_ambient_temp_c": _safe_float(row.get("avg_ambient_temp_c"), 2),
+                "max_module_temp_c": _safe_float(row.get("max_module_temp_c"), 2),
+                "total_solar_radiation_kwh_m2": _safe_float(row.get("total_solar_radiation_kwh_m2"), 3),
             })
 
     # ---- treemap: block × inverter × rated_dc_kw × pr ----
@@ -557,6 +602,8 @@ def dashboard_plant(
     result = {
         "period": {"start": _iso(start_date), "end": _iso(end_date)},
         "clamped_note": clamped_note,
+        "plant_median_pr": plant_median_pr,
+        "underperformance_threshold_pp": LEADERBOARD_UNDERPERF_PP,
         "blocks": blocks_out,
         "inverters_best": inverters_best,
         "inverters_worst": inverters_worst,

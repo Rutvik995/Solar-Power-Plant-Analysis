@@ -64,18 +64,6 @@ const KPI_GLOSSARY = {
 export default function DashboardPage() {
   const [searchParams, setSearchParams] = useSearchParams();
 
-  // URL query params state
-  const activeTab = searchParams.get('tab') || 'overview';
-  const selectedPlant = searchParams.get('plant') || 'all';
-  const startDate = searchParams.get('start') || '2026-08-01';
-  const endDate = searchParams.get('end') || '2026-09-26';
-  const agg = searchParams.get('agg') || 'day';
-  const compare = searchParams.get('compare') !== 'false';
-
-  // Table sorting state
-  const [sortCol, setSortCol] = useState('pr');
-  const [sortDir, setSortDir] = useState('desc');
-
   // Metadata query (plants, min/max log_date)
   const {
     data: meta,
@@ -89,6 +77,30 @@ export default function DashboardPage() {
 
   const minDate = meta?.min_date || '2026-08-01';
   const maxDate = meta?.max_date || '2026-09-26';
+
+  // Default range = the last 28 days of data
+  const defaultRange = useMemo(() => {
+    const end = maxDate;
+    const dEnd = new Date(end);
+    const dStart = new Date(dEnd);
+    dStart.setDate(dStart.getDate() - 27); // 28 calendar days inclusive
+    return {
+      start: dStart.toISOString().slice(0, 10),
+      end,
+    };
+  }, [maxDate]);
+
+  // URL query params state
+  const activeTab = searchParams.get('tab') || 'overview';
+  const selectedPlant = searchParams.get('plant') || 'all';
+  const startDate = searchParams.get('start') || defaultRange.start;
+  const endDate = searchParams.get('end') || defaultRange.end;
+  const agg = searchParams.get('agg') || 'day';
+  const compare = searchParams.get('compare') !== 'false';
+
+  // Table sorting state
+  const [sortCol, setSortCol] = useState('pr');
+  const [sortDir, setSortDir] = useState('desc');
 
   // Helper to update URL params
   const updateFilters = (newParams) => {
@@ -114,6 +126,11 @@ export default function DashboardPage() {
       updateFilters({
         start: dStart.toISOString().slice(0, 10),
         end: maxDate,
+      });
+    } else if (preset === 'last28') {
+      updateFilters({
+        start: defaultRange.start,
+        end: defaultRange.end,
       });
     } else if (preset === 'last30') {
       const dEnd = new Date(maxDate);
@@ -276,6 +293,7 @@ export default function DashboardPage() {
               <span className="text-xs text-[#64748B] mr-1">Presets:</span>
               {[
                 { id: 'last7', label: '7D' },
+                { id: 'last28', label: '28D' },
                 { id: 'last30', label: '30D' },
                 { id: 'august', label: 'August' },
                 { id: 'september', label: 'September' },
@@ -461,7 +479,7 @@ export default function DashboardPage() {
                 title="Availability"
                 value={
                   overview?.kpis?.availability_pct?.value !== null && overview?.kpis?.availability_pct?.value !== undefined
-                    ? `${Number(overview.kpis.availability_pct.value).toFixed(1)}%`
+                    ? `${Number(overview.kpis.availability_pct.value).toFixed(2)}%`
                     : '—'
                 }
                 unit=""
@@ -490,6 +508,19 @@ export default function DashboardPage() {
                 icon={ShieldAlert}
                 loading={overviewLoading}
               />
+            </div>
+          )}
+
+          {/* Previous period note or no earlier data note (single line under cards, not on every card) */}
+          {compare && !overviewError && (
+            <div className="text-xs text-[#64748B] -mt-3 px-1">
+              {overview?.previous_period?.note ? (
+                <span>{overview.previous_period.note}</span>
+              ) : overview?.previous_period && !overview.previous_period.has_data ? (
+                <span>No earlier data for this range</span>
+              ) : startDate <= minDate ? (
+                <span>No earlier data for this range</span>
+              ) : null}
             </div>
           )}
 
