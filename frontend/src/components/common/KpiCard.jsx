@@ -68,48 +68,71 @@ export default function KpiCard({
   }
 
   return (
-    <div className={`bg-white border border-[#E2E8F0] rounded-lg p-5 shadow-none transition-colors relative ${className}`}>
-      <div className="flex items-center justify-between mb-2">
-        <div className="flex items-center gap-1.5 min-w-0">
-          <span className="text-xs font-semibold text-[#64748B] uppercase tracking-wider truncate">
+    <div className={`bg-white border border-[#E2E8F0] rounded-lg p-4 shadow-none transition-colors relative ${className}`}>
+      {/* 1. Header with wrapped title, inline glossary ? tooltip, and non-overlapping icon */}
+      <div className="flex items-start justify-between gap-1.5 mb-2 min-h-[2.5rem]">
+        <div className="flex-1 min-w-0 pr-1">
+          <span className="text-xs font-semibold text-[#64748B] uppercase tracking-wider leading-snug inline">
             {title}
+            {tooltip && (
+              <span className="relative inline-block align-baseline ml-1">
+                <button
+                  type="button"
+                  onMouseEnter={() => setShowTooltip(true)}
+                  onMouseLeave={() => setShowTooltip(false)}
+                  onClick={() => setShowTooltip((p) => !p)}
+                  className="text-[#94A3B8] hover:text-[#2563EB] transition-colors p-0.5 rounded focus:outline-none align-middle -translate-y-px"
+                  aria-label={`Definition for ${title}`}
+                >
+                  <HelpCircle className="w-3.5 h-3.5" />
+                </button>
+                {showTooltip && (
+                  <div className="absolute z-50 bottom-full left-0 mb-2 w-64 p-2.5 bg-[#0F172A] text-white text-xs rounded-lg shadow-xl border border-slate-700 pointer-events-none leading-relaxed normal-case tracking-normal font-normal">
+                    <span className="block font-semibold text-[#93C5FD] mb-0.5">{title}</span>
+                    <span>{tooltip}</span>
+                    <div className="absolute top-full left-3 border-4 border-transparent border-t-[#0F172A]" />
+                  </div>
+                )}
+              </span>
+            )}
           </span>
-          {tooltip && (
-            <div className="relative inline-block">
-              <button
-                type="button"
-                onMouseEnter={() => setShowTooltip(true)}
-                onMouseLeave={() => setShowTooltip(false)}
-                onClick={() => setShowTooltip((p) => !p)}
-                className="text-[#94A3B8] hover:text-[#2563EB] transition-colors p-0.5 rounded focus:outline-none"
-                aria-label={`Definition for ${title}`}
-              >
-                <HelpCircle className="w-3.5 h-3.5" />
-              </button>
-              {showTooltip && (
-                <div className="absolute z-50 bottom-full left-0 mb-2 w-64 p-2.5 bg-[#0F172A] text-white text-xs rounded-lg shadow-xl border border-slate-700 pointer-events-none leading-relaxed">
-                  <span className="block font-semibold text-[#93C5FD] mb-0.5">{title}</span>
-                  <span>{tooltip}</span>
-                  <div className="absolute top-full left-3 border-4 border-transparent border-t-[#0F172A]" />
-                </div>
-              )}
-            </div>
-          )}
         </div>
         {Icon && (
-          <div className="p-2 rounded-lg bg-[#EFF6FF] border border-[#2563EB]/20 text-[#2563EB] shrink-0">
+          <div className="p-1.5 rounded-lg bg-[#EFF6FF] border border-[#2563EB]/20 text-[#2563EB] shrink-0 self-start">
             <Icon className="w-4 h-4" />
           </div>
         )}
       </div>
 
-      <div className="flex items-baseline gap-2 mb-3">
+      {/* 2. Value */}
+      <div className="flex items-baseline gap-1.5 mb-1.5">
         <span className="text-2xl font-bold tracking-tight text-[#0F172A]">
           {value !== null && value !== undefined ? value : '—'}
         </span>
         {unit && <span className="text-xs text-[#64748B] font-medium">{unit}</span>}
       </div>
 
+      {/* 3. Visible Sparkline */}
+      <div className="w-full h-8 my-2">
+        {sparklineData && sparklineData.length > 1 ? (
+          <ResponsiveContainer width="100%" height="100%">
+            <LineChart data={sparklineData} margin={{ top: 2, right: 2, left: 2, bottom: 2 }}>
+              <Line
+                type="monotone"
+                dataKey="value"
+                stroke={sparklineColor || '#2563EB'}
+                strokeWidth={2}
+                dot={false}
+                isAnimationActive={false}
+              />
+            </LineChart>
+          </ResponsiveContainer>
+        ) : (
+          <div className="h-full border-b border-dashed border-[#E2E8F0]/70 flex items-center" />
+        )}
+      </div>
+
+      {/* 4. Change Line */}
       <div className="flex items-center justify-between pt-2 border-t border-[#E2E8F0] text-xs">
         {hasDelta ? (
           <div className="flex items-center gap-1.5">
@@ -123,23 +146,6 @@ export default function KpiCard({
           </div>
         ) : (
           <span />
-        )}
-
-        {sparklineData && sparklineData.length > 1 && (
-          <div className="w-20 h-6">
-            <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={sparklineData}>
-                <Line
-                  type="monotone"
-                  dataKey="value"
-                  stroke={sparklineColor || '#2563EB'}
-                  strokeWidth={1.5}
-                  dot={false}
-                  isAnimationActive={false}
-                />
-              </LineChart>
-            </ResponsiveContainer>
-          </div>
         )}
       </div>
     </div>

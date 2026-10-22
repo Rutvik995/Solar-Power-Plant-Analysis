@@ -1,21 +1,45 @@
-import psycopg2
-from psycopg2.extras import execute_values
+import os
 import random
+import argparse
 from datetime import datetime, timedelta
+from urllib.parse import urlparse
+
+try:
+    import psycopg
+    USE_PSYCOPG3 = True
+except ImportError:
+    import psycopg2 as psycopg
+    from psycopg2.extras import execute_values
+    USE_PSYCOPG3 = False
 
 # --------------------------------------------------------------------------------
-# DATABASE CREDENTIALS (UPDATE THESE IF NEEDED)
+# DATABASE CREDENTIALS (LOAD FROM ENV OR FALLBACK)
 # --------------------------------------------------------------------------------
 DB_HOST = "localhost"
 DB_NAME = "solardata"
 DB_USER = "postgres"
-DB_PASS = "123456789"  # Update with your local postgres password
+DB_PASS = "123456789"
 DB_PORT = "5432"
+
+db_url = os.environ.get("DATABASE_URL")
+if db_url:
+    clean_url = db_url.replace("postgresql+psycopg://", "postgresql://").replace("postgresql+asyncpg://", "postgresql://")
+    parsed = urlparse(clean_url)
+    if parsed.hostname:
+        DB_HOST = parsed.hostname
+    if parsed.port:
+        DB_PORT = str(parsed.port)
+    if parsed.username:
+        DB_USER = parsed.username
+    if parsed.password:
+        DB_PASS = parsed.password
+    if parsed.path:
+        DB_NAME = parsed.path.lstrip("/")
 
 # Connect to database
 def get_connection():
     try:
-        return psycopg2.connect(
+        return psycopg.connect(
             host=DB_HOST,
             dbname=DB_NAME,
             user=DB_USER,
@@ -139,7 +163,6 @@ def seed_hierarchy():
             
             for inv in range(1, p['inv_per_block'] + 1):
                 inv_id = f"P{plant_id}_{block_name}_INV_{inv:02d}"
-                # Rough approximation: divide total MWp equally among inverters
                 total_invs = p['blocks'] * p['inv_per_block']
                 rated_dc = (p['mwp'] * 1000) / total_invs
                 rated_ac = rated_dc * 0.95 # Typical AC to DC ratio
@@ -148,9 +171,14 @@ def seed_hierarchy():
             block_id_counter += 1
             
     print(f"Seeding 5 Plants, {block_id_counter-1} Blocks, {len(inverter_records)} Inverters...")
-    execute_values(cur, "INSERT INTO plants (plant_id, plant_name, area_acres, capacity_mwp) VALUES %s", plant_records)
-    execute_values(cur, "INSERT INTO blocks (block_id, plant_id, block_name) VALUES %s", block_records)
-    execute_values(cur, "INSERT INTO inverters (inverter_id, block_id, plant_id, rated_dc_kw, rated_ac_kw) VALUES %s", inverter_records)
+    if USE_PSYCOPG3:
+        cur.executemany("INSERT INTO plants (plant_id, plant_name, area_acres, capacity_mwp) VALUES (%s, %s, %s, %s)", plant_records)
+        cur.executemany("INSERT INTO blocks (block_id, plant_id, block_name) VALUES (%s, %s, %s)", block_records)
+        cur.executemany("INSERT INTO inverters (inverter_id, block_id, plant_id, rated_dc_kw, rated_ac_kw) VALUES (%s, %s, %s, %s, %s)", inverter_records)
+    else:
+        execute_values(cur, "INSERT INTO plants (plant_id, plant_name, area_acres, capacity_mwp) VALUES %s", plant_records)
+        execute_values(cur, "INSERT INTO blocks (block_id, plant_id, block_name) VALUES %s", block_records)
+        execute_values(cur, "INSERT INTO inverters (inverter_id, block_id, plant_id, rated_dc_kw, rated_ac_kw) VALUES %s", inverter_records)
     
     conn.commit()
     cur.close()
@@ -158,59 +186,97 @@ def seed_hierarchy():
     
     return inverter_records
 
-def ingest_single_day(log_date_str, inverter_data_list, weather_data_list):
+def get_or_seed_inverters():
     """
-    4. DAILY INGESTION FUNCTION FOR FUTURE USE
-    Executes UPSERT on inverter and weather telemetry.
+    Fetch existing inverters from the database.
+    If none exist, seeds the hierarchy and returns them.
+    """
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT inverter_id, block_id, plant_id, rated_dc_kw, rated_ac_kw FROM inverters ORDER BY plant_id, inverter_id")
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        if rows and len(rows) > 0:
+            return rows
+    except Exception as e:
+        print(f"Notice: Table check failed ({e}). Seeding schema and hierarchy...")
+        create_schema()
+    return seed_hierarchy()
+
+def ingest_single_day(log_date, inverter_data_list, weather_data_list, overwrite=False):
+    """
+    4. DAILY INGESTION FUNCTION
+    Executes INSERT / UPSERT on inverter and weather telemetry.
+    If overwrite is False, uses ON CONFLICT DO NOTHING so existing data is preserved.
     """
     conn = get_connection()
     cur = conn.cursor()
     
-    # Upsert Weather Telemetry
-    weather_query = """
+    if overwrite:
+        weather_conflict = """
+            ON CONFLICT (plant_id, log_date) DO UPDATE SET
+                peak_poa_irradiance_w_m2 = EXCLUDED.peak_poa_irradiance_w_m2,
+                total_solar_radiation_kwh_m2 = EXCLUDED.total_solar_radiation_kwh_m2,
+                avg_ambient_temp_c = EXCLUDED.avg_ambient_temp_c,
+                max_module_temp_c = EXCLUDED.max_module_temp_c,
+                soiling_ratio = EXCLUDED.soiling_ratio;
+        """
+        inverter_conflict = """
+            ON CONFLICT (inverter_id, log_date) DO UPDATE SET
+                peak_dc_power_kw = EXCLUDED.peak_dc_power_kw,
+                peak_ac_power_kw = EXCLUDED.peak_ac_power_kw,
+                total_daily_yield_kwh = EXCLUDED.total_daily_yield_kwh,
+                avg_dc_voltage_v = EXCLUDED.avg_dc_voltage_v,
+                avg_dc_current_a = EXCLUDED.avg_dc_current_a,
+                inverter_status_code = EXCLUDED.inverter_status_code;
+        """
+    else:
+        weather_conflict = "ON CONFLICT (plant_id, log_date) DO NOTHING;"
+        inverter_conflict = "ON CONFLICT (inverter_id, log_date) DO NOTHING;"
+
+    weather_query = f"""
         INSERT INTO daily_weather_telemetry 
         (log_date, plant_id, peak_poa_irradiance_w_m2, total_solar_radiation_kwh_m2, 
         avg_ambient_temp_c, max_module_temp_c, soiling_ratio)
-        VALUES %s
-        ON CONFLICT (plant_id, log_date) DO UPDATE SET
-            peak_poa_irradiance_w_m2 = EXCLUDED.peak_poa_irradiance_w_m2,
-            total_solar_radiation_kwh_m2 = EXCLUDED.total_solar_radiation_kwh_m2,
-            avg_ambient_temp_c = EXCLUDED.avg_ambient_temp_c,
-            max_module_temp_c = EXCLUDED.max_module_temp_c,
-            soiling_ratio = EXCLUDED.soiling_ratio;
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        {weather_conflict}
     """
-    if weather_data_list:
-        execute_values(cur, weather_query, weather_data_list)
-        
-    # Upsert Inverter Telemetry
-    inverter_query = """
+
+    inverter_query = f"""
         INSERT INTO daily_inverter_telemetry 
         (log_date, inverter_id, plant_id, peak_dc_power_kw, peak_ac_power_kw, 
         total_daily_yield_kwh, avg_dc_voltage_v, avg_dc_current_a, inverter_status_code)
-        VALUES %s
-        ON CONFLICT (inverter_id, log_date) DO UPDATE SET
-            peak_dc_power_kw = EXCLUDED.peak_dc_power_kw,
-            peak_ac_power_kw = EXCLUDED.peak_ac_power_kw,
-            total_daily_yield_kwh = EXCLUDED.total_daily_yield_kwh,
-            avg_dc_voltage_v = EXCLUDED.avg_dc_voltage_v,
-            avg_dc_current_a = EXCLUDED.avg_dc_current_a,
-            inverter_status_code = EXCLUDED.inverter_status_code;
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        {inverter_conflict}
     """
+
+    if weather_data_list:
+        if USE_PSYCOPG3:
+            cur.executemany(weather_query, weather_data_list)
+        else:
+            execute_values(cur, weather_query.replace("(%s, %s, %s, %s, %s, %s, %s)", "%s"), weather_data_list)
+        
     if inverter_data_list:
-        execute_values(cur, inverter_query, inverter_data_list)
+        if USE_PSYCOPG3:
+            cur.executemany(inverter_query, inverter_data_list)
+        else:
+            execute_values(cur, inverter_query.replace("(%s, %s, %s, %s, %s, %s, %s, %s, %s)", "%s"), inverter_data_list)
         
     conn.commit()
     cur.close()
     conn.close()
 
-def generate_data(inverter_records, start_date=None, end_date=None):
+def generate_data(inverter_records, start_date=None, end_date=None, overwrite=False):
     # --------------------------------------------------------------------------------
-    # 3. DAILY DATA GENERATION LOGIC WITH INJECTED ANOMALIES (1st Aug to 26th Sep)
+    # 3. DAILY DATA GENERATION LOGIC WITH INJECTED ANOMALIES
+    # Supports July to October 2026 (or custom date range)
     # --------------------------------------------------------------------------------
     if start_date is None:
-        start_date = datetime(2026, 8, 1).date()
+        start_date = datetime(2026, 7, 1).date()
     if end_date is None:
-        end_date = datetime(2026, 9, 26).date()
+        end_date = datetime(2026, 10, 21).date()
         
     days = (end_date - start_date).days + 1
     
@@ -227,19 +293,42 @@ def generate_data(inverter_records, start_date=None, end_date=None):
         
         for plant_id in range(1, 6):
             # Normal randomized baseline weather for the day
-            peak_irrad = random.uniform(850, 1050)
-            total_rad = peak_irrad * random.uniform(5.5, 7.5) / 1000.0 # Standard rough conversion to kWh/m2
-            avg_amb_temp = random.uniform(28, 38)
-            max_mod_temp = random.uniform(42, 62)
-            soiling = random.uniform(0.95, 0.98)
+            # Seasonal variation: July slightly higher humidity/clouds, October cooler
+            if current_date.month == 7:
+                # July monsoon/summer: occasional overcast day
+                if current_date.day in (11, 12):
+                    peak_irrad = random.uniform(480, 680)
+                    total_rad = peak_irrad * random.uniform(3.5, 4.5) / 1000.0
+                    avg_amb_temp = random.uniform(26, 30)
+                    max_mod_temp = random.uniform(34, 42)
+                    soiling = random.uniform(0.98, 0.99)
+                else:
+                    peak_irrad = random.uniform(820, 1020)
+                    total_rad = peak_irrad * random.uniform(5.4, 7.2) / 1000.0
+                    avg_amb_temp = random.uniform(28, 37)
+                    max_mod_temp = random.uniform(42, 60)
+                    soiling = random.uniform(0.96, 0.99)
+            elif current_date.month == 10:
+                # October autumn: crisp sunny days, cooler ambient
+                peak_irrad = random.uniform(840, 1010)
+                total_rad = peak_irrad * random.uniform(5.2, 6.8) / 1000.0
+                avg_amb_temp = random.uniform(24, 32)
+                max_mod_temp = random.uniform(38, 52)
+                soiling = random.uniform(0.94, 0.97)
+            else:
+                peak_irrad = random.uniform(850, 1050)
+                total_rad = peak_irrad * random.uniform(5.5, 7.5) / 1000.0
+                avg_amb_temp = random.uniform(28, 38)
+                max_mod_temp = random.uniform(42, 62)
+                soiling = random.uniform(0.95, 0.98)
             
-            # --- WEATHER ANOMALIES ---
+            # --- WEATHER ANOMALIES (preserve benchmark anomalies) ---
             # 3. Thermal Efficiency Loss (2026-09-23, Plant 5)
             if current_date == datetime(2026, 9, 23).date() and plant_id == 5:
                 max_mod_temp = 64.0
             
             # 4. Dust Accumulation Loss (2026-09-19 to 2026-09-26, Plant 3)
-            if current_date >= datetime(2026, 9, 19).date() and plant_id == 3:
+            if current_date >= datetime(2026, 9, 19).date() and current_date <= datetime(2026, 9, 26).date() and plant_id == 3:
                 soiling = 0.78
                 
             # 5. August Dust Accumulation & Cleaning Event (Plant 4)
@@ -264,6 +353,8 @@ def generate_data(inverter_records, start_date=None, end_date=None):
             
             for inv in plant_invs:
                 inv_id, block_id, p_id, rated_dc, rated_ac = inv
+                rated_dc = float(rated_dc)
+                rated_ac = float(rated_ac)
                 
                 status_code = 0
                 efficiency = 0.98
@@ -315,7 +406,7 @@ def generate_data(inverter_records, start_date=None, end_date=None):
                 ))
                 
         # Ingest the day using the reusable function
-        ingest_single_day(current_date, daily_inverters, daily_weather)
+        ingest_single_day(current_date, daily_inverters, daily_weather, overwrite=overwrite)
         print(f"Ingested telemetry for {current_date}")
 
 def run_tests():
@@ -330,6 +421,14 @@ def run_tests():
         cur.execute(f"SELECT COUNT(*) FROM {t}")
         print(f"Total rows in {t.ljust(25)}: {cur.fetchone()[0]}")
         
+    cur.execute("SELECT MIN(log_date), MAX(log_date) FROM daily_weather_telemetry")
+    row = cur.fetchone()
+    print(f"Weather date range: {row[0]} to {row[1]}")
+
+    cur.execute("SELECT MIN(log_date), MAX(log_date) FROM daily_inverter_telemetry")
+    row = cur.fetchone()
+    print(f"Inverter date range: {row[0]} to {row[1]}")
+
     print("\n---------------------------------------------------------")
     print("VERIFYING INJECTED ANOMALIES")
     print("---------------------------------------------------------")
@@ -340,57 +439,44 @@ def run_tests():
         FROM daily_inverter_telemetry 
         WHERE inverter_id = 'P1_Block_A_INV_02' AND log_date = '2026-09-16'
     """)
-    print("1. Complete Inverter Trip (Day 5, Plant 1):")
+    print("1. Complete Inverter Trip (Plant 1, P1_Block_A_INV_02, 2026-09-16):")
     print("   ->", cur.fetchone())
     
-    # 2. Localized Shading (Day 10 = 2026-09-21)
+    # 2. Localized Shading (2026-09-21)
     cur.execute("""
         SELECT log_date, inverter_id, total_daily_yield_kwh, inverter_status_code 
         FROM daily_inverter_telemetry 
         WHERE inverter_id = 'P2_Block_B_INV_04' AND log_date = '2026-09-21'
     """)
-    print("\n2. Localized Shading / String Loss (Day 10, Plant 2):")
+    print("\n2. Localized Shading / String Loss (Plant 2, P2_Block_B_INV_04, 2026-09-21):")
     print("   ->", cur.fetchone())
     
-    # 3. Thermal Efficiency Loss (Day 12 = 2026-09-23)
-    cur.execute("""
-        SELECT w.log_date, w.plant_id, w.max_module_temp_c, ROUND(AVG(i.total_daily_yield_kwh), 2) as avg_yield_kwh
-        FROM daily_weather_telemetry w
-        JOIN daily_inverter_telemetry i ON w.plant_id = i.plant_id AND w.log_date = i.log_date
-        WHERE w.plant_id = 5 AND w.log_date IN ('2026-09-22', '2026-09-23')
-        GROUP BY w.log_date, w.plant_id, w.max_module_temp_c
-        ORDER BY w.log_date
-    """)
-    print("\n3. Thermal Efficiency Loss (Plant 5, Normal Day 11 vs Anomaly Day 12):")
-    for row in cur.fetchall():
-        print("   ->", row)
-        
-    # 4. Dust Accumulation Loss (Day 8 = 2026-09-19)
-    cur.execute("""
-        SELECT w.log_date, w.plant_id, w.soiling_ratio, ROUND(AVG(i.total_daily_yield_kwh), 2) as avg_yield_kwh
-        FROM daily_weather_telemetry w
-        JOIN daily_inverter_telemetry i ON w.plant_id = i.plant_id AND w.log_date = i.log_date
-        WHERE w.plant_id = 3 AND w.log_date IN ('2026-09-18', '2026-09-19')
-        GROUP BY w.log_date, w.plant_id, w.soiling_ratio
-        ORDER BY w.log_date
-    """)
-    print("\n4. Dust Accumulation Loss (Plant 3, Normal Day 7 vs Anomaly Day 8):")
-    for row in cur.fetchall():
-        print("   ->", row)
-
     cur.close()
     conn.close()
 
 if __name__ == "__main__":
-    print("Starting generation process...\n")
+    parser = argparse.ArgumentParser(description="Generate and insert solar power plant telemetry data")
+    parser.add_argument("--start-date", default="2026-07-01", help="Start date (YYYY-MM-DD), default: 2026-07-01")
+    parser.add_argument("--end-date", default="2026-10-21", help="End date (YYYY-MM-DD), default: 2026-10-21")
+    parser.add_argument("--reset-schema", action="store_true", help="Drop and recreate database schema before generating")
+    parser.add_argument("--overwrite", action="store_true", help="Overwrite existing records on conflict")
+    args = parser.parse_args()
+
+    s_date = datetime.strptime(args.start_date, "%Y-%m-%d").date()
+    e_date = datetime.strptime(args.end_date, "%Y-%m-%d").date()
+
+    print(f"Starting solar telemetry generation from {s_date} to {e_date}...")
     try:
-        create_schema()
-        inverters = seed_hierarchy()
-        print("\nGenerating Data from 1st August to 26th September (57 Days)...")
-        generate_data(inverters)
+        if args.reset_schema:
+            create_schema()
+            inverters = seed_hierarchy()
+        else:
+            inverters = get_or_seed_inverters()
+
+        print(f"\nGenerating Data from {s_date} to {e_date} ({(e_date - s_date).days + 1} Days)...")
+        generate_data(inverters, start_date=s_date, end_date=e_date, overwrite=args.overwrite)
         run_tests()
         print("\nData generation complete!")
-    except psycopg2.Error as e:
-        print(f"\nDatabase error occurred: {e}")
     except Exception as e:
         print(f"\nAn error occurred: {e}")
+        raise

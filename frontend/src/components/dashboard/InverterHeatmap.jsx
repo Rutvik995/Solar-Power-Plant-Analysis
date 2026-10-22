@@ -8,7 +8,7 @@ import { Info, HelpCircle } from 'lucide-react';
 
 /**
  * Returns color from red (#DC2626) through amber (#D97706) to green (#16A34A).
- * Grey (#CBD5E1) represents null or missing data.
+ * Grey (#E2E8F0) represents null or missing data.
  */
 export function getPrHeatmapColor(pr) {
   if (pr === null || pr === undefined) return '#E2E8F0'; // grey for no data
@@ -20,6 +20,29 @@ export function getPrHeatmapColor(pr) {
   return '#16A34A';                           // Green - optimal
 }
 
+/**
+ * Difference mode color: PR minus that day's plant median PR.
+ * - Grey (#94A3B8) within ±1 point
+ * - Amber (#D97706) for moderate deficits (-3 to -1 pp)
+ * - Red (#DC2626) for larger deficits (<-3 pp)
+ * - Blue (#2563EB) for larger surpluses (>+1 pp)
+ * - Light grey (#E2E8F0) for missing/no data
+ */
+export function getDiffHeatmapColor(diff) {
+  if (diff === null || diff === undefined || isNaN(diff)) return '#E2E8F0';
+  if (Math.abs(diff) <= 1.0) {
+    return '#94A3B8'; // grey within ±1 point
+  }
+  if (diff < -3.0) {
+    return '#DC2626'; // red for larger deficits
+  }
+  if (diff < -1.0) {
+    return '#D97706'; // amber for moderate deficits
+  }
+  // diff > 1.0
+  return '#2563EB'; // blue for larger surpluses
+}
+
 export default function InverterHeatmap({
   plantId,
   startDate,
@@ -27,6 +50,7 @@ export default function InverterHeatmap({
   onSelectInverter,
 }) {
   const [hoveredCell, setHoveredCell] = useState(null);
+  const [viewMode, setViewMode] = useState('absolute'); // 'absolute' | 'difference'
 
   const {
     data,
@@ -44,44 +68,113 @@ export default function InverterHeatmap({
   const prMatrix = data?.pr || [];
   const statusMatrix = data?.status || [];
 
+  // Calculate each day's plant median PR across all inverters
+  const dailyMedians = useMemo(() => {
+    if (!prMatrix || prMatrix.length === 0 || !dates || dates.length === 0) return [];
+    return dates.map((_, dateIdx) => {
+      const vals = [];
+      for (let invIdx = 0; invIdx < inverters.length; invIdx++) {
+        const p = prMatrix[invIdx]?.[dateIdx];
+        if (p !== null && p !== undefined && !isNaN(p)) {
+          vals.push(p <= 1.0 ? p * 100 : p);
+        }
+      }
+      if (vals.length === 0) return null;
+      vals.sort((a, b) => a - b);
+      const mid = Math.floor(vals.length / 2);
+      return vals.length % 2 !== 0 ? vals[mid] : (vals[mid - 1] + vals[mid]) / 2;
+    });
+  }, [dates, inverters, prMatrix]);
+
   return (
     <div className="space-y-3">
-      {/* Heatmap Controls & Legend */}
-      <div className="flex flex-wrap items-center justify-between gap-3 text-xs">
-        <div className="flex items-center gap-2 text-[#64748B]">
-          <span>Click any cell or inverter to inspect daily telemetry drawer.</span>
+      {/* Heatmap Controls: Mode Toggle & Dynamic Legend */}
+      <div className="flex flex-wrap items-center justify-between gap-3 text-xs bg-[#F8FAFC] border border-[#E2E8F0] p-2.5 rounded-xl">
+        {/* Toggle between Absolute PR and Difference from peers */}
+        <div className="flex items-center gap-3">
+          <div className="flex items-center bg-[#E2E8F0]/70 border border-[#CBD5E1] rounded-lg p-0.5">
+            <button
+              type="button"
+              onClick={() => setViewMode('absolute')}
+              className={`px-3 py-1 text-xs font-semibold rounded-md transition-all ${
+                viewMode === 'absolute'
+                  ? 'bg-white text-[#2563EB] shadow-xs'
+                  : 'text-[#64748B] hover:text-[#0F172A]'
+              }`}
+            >
+              Absolute PR
+            </button>
+            <button
+              type="button"
+              onClick={() => setViewMode('difference')}
+              className={`px-3 py-1 text-xs font-semibold rounded-md transition-all ${
+                viewMode === 'difference'
+                  ? 'bg-white text-[#2563EB] shadow-xs'
+                  : 'text-[#64748B] hover:text-[#0F172A]'
+              }`}
+            >
+              Difference from peers
+            </button>
+          </div>
+
           {data?.clamped_note && (
-            <span className="text-[#D97706] bg-[#FFFBEB] px-2 py-0.5 rounded border border-[#D97706]/20">
+            <span className="text-[#D97706] bg-[#FFFBEB] px-2 py-0.5 rounded border border-[#D97706]/20 text-[11px]">
               {data.clamped_note}
             </span>
           )}
         </div>
 
-        {/* Legend */}
-        <div className="flex items-center gap-3">
-          <span className="text-[#64748B] font-medium text-[11px]">PR Scale:</span>
-          <div className="flex items-center gap-1.5 text-[11px] text-[#0F172A]">
-            <div className="flex items-center gap-1">
-              <span className="w-3 h-3 rounded-xs bg-[#DC2626]" />
-              <span>&lt;70%</span>
+        {/* Legend dependent on view mode */}
+        <div className="flex items-center gap-2">
+          {viewMode === 'absolute' ? (
+            <div className="flex items-center gap-2 text-[11px] text-[#0F172A]">
+              <span className="text-[#64748B] font-medium mr-1">Scale:</span>
+              <div className="flex items-center gap-1">
+                <span className="w-3 h-3 rounded-xs bg-[#DC2626]" />
+                <span>&lt;70%</span>
+              </div>
+              <div className="flex items-center gap-1">
+                <span className="w-3 h-3 rounded-xs bg-[#F59E0B]" />
+                <span>70–85%</span>
+              </div>
+              <div className="flex items-center gap-1">
+                <span className="w-3 h-3 rounded-xs bg-[#84CC16]" />
+                <span>86–90%</span>
+              </div>
+              <div className="flex items-center gap-1">
+                <span className="w-3 h-3 rounded-xs bg-[#16A34A]" />
+                <span>&gt;90%</span>
+              </div>
+              <div className="flex items-center gap-1 ml-1 pl-1.5 border-l border-[#E2E8F0]">
+                <span className="w-3 h-3 rounded-xs bg-[#E2E8F0]" />
+                <span className="text-[#64748B]">No Data</span>
+              </div>
             </div>
-            <div className="flex items-center gap-1">
-              <span className="w-3 h-3 rounded-xs bg-[#F59E0B]" />
-              <span>70-85%</span>
+          ) : (
+            <div className="flex items-center gap-2 text-[11px] text-[#0F172A]">
+              <span className="text-[#64748B] font-medium mr-1">Diff from Median:</span>
+              <div className="flex items-center gap-1">
+                <span className="w-3 h-3 rounded-xs bg-[#DC2626]" />
+                <span>&lt;−3 pp</span>
+              </div>
+              <div className="flex items-center gap-1">
+                <span className="w-3 h-3 rounded-xs bg-[#D97706]" />
+                <span>−3 to −1 pp</span>
+              </div>
+              <div className="flex items-center gap-1">
+                <span className="w-3 h-3 rounded-xs bg-[#94A3B8]" />
+                <span>±1 pp (median)</span>
+              </div>
+              <div className="flex items-center gap-1">
+                <span className="w-3 h-3 rounded-xs bg-[#2563EB]" />
+                <span>&gt;+1 pp (surplus)</span>
+              </div>
+              <div className="flex items-center gap-1 ml-1 pl-1.5 border-l border-[#E2E8F0]">
+                <span className="w-3 h-3 rounded-xs bg-[#E2E8F0]" />
+                <span className="text-[#64748B]">No Data</span>
+              </div>
             </div>
-            <div className="flex items-center gap-1">
-              <span className="w-3 h-3 rounded-xs bg-[#84CC16]" />
-              <span>86-90%</span>
-            </div>
-            <div className="flex items-center gap-1">
-              <span className="w-3 h-3 rounded-xs bg-[#16A34A]" />
-              <span>&gt;90%</span>
-            </div>
-            <div className="flex items-center gap-1 ml-1 pl-1.5 border-l border-[#E2E8F0]">
-              <span className="w-3 h-3 rounded-xs bg-[#E2E8F0]" />
-              <span className="text-[#64748B]">No Data</span>
-            </div>
-          </div>
+          )}
         </div>
       </div>
 
@@ -146,7 +239,21 @@ export default function InverterHeatmap({
                       {dates.map((d, dateIdx) => {
                         const prVal = prRow[dateIdx];
                         const sc = statusRow[dateIdx];
-                        const cellColor = getPrHeatmapColor(prVal);
+                        const dayMedian = dailyMedians[dateIdx];
+                        const prPct =
+                          prVal !== null && prVal !== undefined
+                            ? Number((prVal <= 1.0 ? prVal * 100 : prVal).toFixed(2))
+                            : null;
+                        const diffVal =
+                          prPct !== null && dayMedian !== null
+                            ? Number((prPct - dayMedian).toFixed(2))
+                            : null;
+
+                        const cellColor =
+                          viewMode === 'absolute'
+                            ? getPrHeatmapColor(prVal)
+                            : getDiffHeatmapColor(diffVal);
+
                         const isHovered =
                           hoveredCell?.inv === inv && hoveredCell?.date === d;
 
@@ -158,7 +265,9 @@ export default function InverterHeatmap({
                               setHoveredCell({
                                 inv,
                                 date: d,
-                                pr: prVal,
+                                pr: prPct,
+                                dayMedian,
+                                diff: diffVal,
                                 status: sc,
                               })
                             }
@@ -172,22 +281,41 @@ export default function InverterHeatmap({
 
                             {/* Hover Tooltip */}
                             {isHovered && (
-                              <div className="absolute z-50 bottom-full left-1/2 -translate-x-1/2 mb-1.5 w-44 p-2 bg-[#0F172A] text-white text-[11px] rounded-lg shadow-xl pointer-events-none text-left leading-normal border border-slate-700">
+                              <div className="absolute z-50 bottom-full left-1/2 -translate-x-1/2 mb-1.5 w-48 p-2.5 bg-[#0F172A] text-white text-[11px] rounded-lg shadow-xl pointer-events-none text-left leading-normal border border-slate-700">
                                 <span className="font-bold text-[#93C5FD] block truncate">
                                   {inv}
                                 </span>
-                                <span className="text-slate-300 block">{d}</span>
-                                <span className="font-semibold block mt-1">
-                                  PR:{' '}
-                                  {prVal !== null && prVal !== undefined
-                                    ? `${(prVal <= 1 ? prVal * 100 : prVal).toFixed(1)}%`
-                                    : 'No data'}
-                                </span>
-                                {sc !== null && sc !== undefined && (
-                                  <span className="text-slate-300 block">
-                                    Status code: {sc}
+                                <span className="text-slate-300 block text-[10px]">{d}</span>
+                                <div className="mt-1 space-y-0.5 border-t border-slate-700 pt-1">
+                                  <span className="font-semibold block">
+                                    PR: {prPct !== null ? `${prPct.toFixed(1)}%` : 'No data'}
                                   </span>
-                                )}
+                                  {dayMedian !== null && dayMedian !== undefined && (
+                                    <span className="text-slate-300 block text-[10px]">
+                                      Peer median: {dayMedian.toFixed(1)}%
+                                    </span>
+                                  )}
+                                  {diffVal !== null && (
+                                    <span
+                                      className="font-semibold block text-[10px]"
+                                      style={{
+                                        color:
+                                          Math.abs(diffVal) <= 1
+                                            ? '#94A3B8'
+                                            : diffVal < 0
+                                            ? '#F87171'
+                                            : '#60A5FA',
+                                      }}
+                                    >
+                                      Diff: {diffVal >= 0 ? `+${diffVal.toFixed(2)}` : diffVal.toFixed(2)} pp
+                                    </span>
+                                  )}
+                                  {sc !== null && sc !== undefined && (
+                                    <span className="text-slate-400 block text-[10px]">
+                                      Status: {sc}
+                                    </span>
+                                  )}
+                                </div>
                                 <div className="absolute top-full left-1/2 -translate-x-1/2 -mt-1 border-4 border-transparent border-t-[#0F172A]" />
                               </div>
                             )}

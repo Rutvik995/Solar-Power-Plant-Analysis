@@ -1,4 +1,8 @@
 {
+  "0583cb0d29de6260173035c238c0e597": {
+    "content": "{\n  \"intent\": \"fault_diagnosis\",\n  \"scope\": {\n    \"plant_ids\": [2],\n    \"block_ids\": [],\n    \"inverter_ids\": [\"P2_Block_B_INV_04\"],\n    \"start_date\": \"2026-09-21\",\n    \"end_date\": \"2026-09-21\",\n    \"all_plants\": false\n  },\n  \"tasks\": [\n    {\n      \"id\": \"t1\",\n      \"agent\": \"data\",\n      \"description\": \"Fetch telemetry (status, power output, alarms) for inverter P2_Block_B_INV_04 on 2026-09-21.\",\n      \"inputs\": {\n        \"plant_ids\": [2],\n        \"inverter_ids\": [\"P2_Block_B_INV_04\"],\n        \"start_date\": \"2026-09-21\",\n        \"end_date\": \"2026-09-21\"\n      },\n      \"depends_on\": []\n    },\n    {\n      \"id\": \"t2\",\n      \"agent\": \"fault\",\n      \"description\": \"Analyze the retrieved telemetry to identify the reason the inverter failed on 2026-09-21, including any fault codes, zero\u2011generation periods, or anomalies compared to peer inverters.\",\n      \"inputs\": {\n        \"data_ref\": \"$t1.data_ref\"\n      },\n      \"depends_on\": [\"t1\"]\n    }\n  ],\n  \"success_criteria\": \"Provide a clear explanation of the failure cause for inverter P2_Block_B_INV_04 on 21\u202fSept\u202f2026, including any fault codes or abnormal conditions detected.\"\n}",
+    "tool_calls": []
+  },
   "6c7a27d61bf60fb7370bc59d6c157b42": {
     "content": "{\n  \"intent\": \"root_cause\",\n  \"scope\": {\n    \"plant_ids\": [],\n    \"block_ids\": [],\n    \"inverter_ids\": [\"P3_Block_B_INV_01\"],\n    \"start_date\": \"2026-08-01\",\n    \"end_date\": \"2026-09-26\",\n    \"all_plants\": false\n  },\n  \"tasks\": [\n    {\n      \"id\": \"t1\",\n      \"agent\": \"data\",\n      \"description\": \"Fetch daily telemetry for inverter P3_Block_B_INV_01 and all other inverters in Block_B for the period 2026-08-01 to 2026-09-26.\",\n      \"inputs\": {\n        \"plant_ids\": [],\n        \"inverter_ids\": [\"P3_Block_B_INV_01\"],\n        \"block_name\": \"Block_B\",\n        \"start_date\": \"2026-08-01\",\n        \"end_date\": \"2026-09-26\"\n      },\n      \"depends_on\": []\n    },\n    {\n      \"id\": \"t2\",\n      \"agent\": \"performance\",\n      \"description\": \"Compute performance ratio (PR) and other KPIs for P3_Block_B_INV_01 and its block peers using the telemetry from t1.\",\n      \"inputs\": {\n        \"data_ref\": \"$t1.data_ref\"\n      },\n      \"depends_on\": [\"t1\"]\n    },\n    {\n      \"id\": \"t3\",\n      \"agent\": \"fault\",\n      \"description\": \"Detect any generation faults, status anomalies, or peer underperformance for P3_Block_B_INV_01 and its block peers during the selected period.\",\n      \"inputs\": {\n        \"data_ref\": \"$t1.data_ref\"\n      },\n      \"depends_on\": [\"t1\"]\n    },\n    {\n      \"id\": \"t4\",\n      \"agent\": \"environment\",\n      \"description\": \"Estimate soiling loss for Block_B over the same period to assess its impact on inverter performance ratios.\",\n      \"inputs\": {\n        \"data_ref\": \"$t1.data_ref\",\n        \"block_name\": \"Block_B\",\n        \"start_date\": \"2026-08-01\",\n        \"end_date\": \"2026-09-26\"\n      },\n      \"depends_on\": [\"t1\"]\n    }\n  ],\n  \"success_criteria\": \"Provide a clear explanation of why inverter P3_Block_B_INV_01's performance ratio deviated from its block peers, referencing computed PR differences, any detected faults, and estimated soiling losses.\"\n}",
     "tool_calls": []
@@ -1504,6 +1508,69 @@
   },
   "ae2f3377127939f03254cb6043de86ce": {
     "content": "{\n  \"headline\": \"**Both flagged inverters recorded a performance ratio of 0%**\",\n  \"explanation\": \"During the flagged events, neither inverter produced any usable power relative to what was expected. This indicates a complete loss of output for those days.\",\n  \"key_points\": [\n    \"P1_Block_A_INV_02 (16 Sep 2026) \u2013 PR\u202f=\u202f0%\",\n    \"P2_Block_B_INV_04 (21 Sep 2026) \u2013 PR\u202f=\u202f0%\"\n  ],\n  \"notes\": [\n    \"The data covers the last 30 days available (28 Aug\u202f2026\u202f\u2013\u202f26 Sep\u202f2026).\",\n    \"PR values are taken directly from the fault analysis output.\"\n  ]\n}",
+    "tool_calls": []
+  },
+  "e107ddbe2473d2a05d58c1de5333167d": {
+    "content": "",
+    "tool_calls": [
+      {
+        "name": "detect_zero_generation_tool",
+        "args": {
+          "data_ref": "df_81ea461b",
+          "irradiance_threshold_kwh_m2": 0.5
+        },
+        "id": "fc_6abd436a-bf13-43ce-a268-e4f89b8214bc",
+        "type": "tool_call"
+      }
+    ]
+  },
+  "5526e848ef216c70f3f12cfc5aa3c8c0": {
+    "content": "",
+    "tool_calls": [
+      {
+        "name": "detect_status_faults_tool",
+        "args": {
+          "data_ref": "df_81ea461b"
+        },
+        "id": "fc_916bc052-c3cb-4068-9ca5-2aa1172f5e8e",
+        "type": "tool_call"
+      }
+    ]
+  },
+  "74162200785e2702c805f99ecb887af5": {
+    "content": "",
+    "tool_calls": [
+      {
+        "name": "detect_peer_underperformance_tool",
+        "args": {
+          "data_ref": "df_81ea461b"
+        },
+        "id": "fc_f684f973-991b-4b57-ae33-f61eaa601bb6",
+        "type": "tool_call"
+      }
+    ]
+  },
+  "9feed7babfbc95cef6726901630af45a": {
+    "content": "",
+    "tool_calls": [
+      {
+        "name": "detect_anomalies_tool",
+        "args": {
+          "data_ref": "df_81ea461b",
+          "window": 14,
+          "z_threshold": 3
+        },
+        "id": "fc_0ad2c502-ba01-40e6-851e-dd677031d47b",
+        "type": "tool_call"
+      }
+    ]
+  },
+  "375c931d81e71cb06b503e3911a87541": {
+    "content": "```json\n{\n  \"status\": \"done\",\n  \"summary\": \"The inverter P2_Block_B_INV_04 experienced a failure on 2026-09-21. The fault was identified solely by a status fault recorded in the telemetry; there was no evidence of zero\u2011generation periods, peer underperformance, or statistical anomalies. This indicates the failure was due to an internal fault condition rather than external environmental or system-wide issues.\",\n  \"metrics\": {\n    \"fault_count\": 1,\n    \"max_streak\": 1,\n    \"zero_generation_instances\": 0,\n    \"peer_underperformance_instances\": 0,\n    \"anomaly_instances\": 0\n  },\n  \"data_ref\": {\n    \"status_faults\": \"df_cbc2a6c6\",\n    \"zero_generation\": \"df_empty\",\n    \"peer_underperformance\": \"df_empty\",\n    \"anomalies\": \"df_9461bced\"\n  },\n  \"warnings\": []\n}\n```",
+    "tool_calls": []
+  },
+  "e669541da52dbb7a76079fe061d79814": {
+    "content": "{\n  \"headline\": \"**Inverter P2_Block_B_INV_04 tripped on 21\u202fSept\u202f2026, stopping its power output.**\",\n  \"explanation\": \"The data shows a fault code that indicates the inverter stopped working, while nearby inverters were still generating about 87% of their expected power. The exact reason for the trip is not shown in the data.\",\n  \"key_points\": [\n    \"Status code\u202f3 means the inverter tripped or had a critical fault.\",\n    \"Performance ratio dropped to 0.0% (peers were at 87%).\",\n    \"Nearby inverters were still receiving sunlight (peer irradiance \u2248\u202f6.5).\"\n  ],\n  \"notes\": [\n    \"The data does not reveal the specific cause of the fault; an inspection is required.\",\n    \"All figures come directly from the provided tool outputs.\"\n  ]\n}",
     "tool_calls": []
   }
 }

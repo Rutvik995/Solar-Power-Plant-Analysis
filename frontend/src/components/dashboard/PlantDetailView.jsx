@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useRef } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { fetchDashboardPlantDetail } from '../../services/api';
 
@@ -38,7 +38,23 @@ import {
 } from 'recharts';
 
 /**
+ * Helper to calculate contrasting text color (dark text on light tiles, white text on dark ones).
+ */
+export function getContrastingTextColor(hex) {
+  if (!hex || hex === 'transparent') return '#0F172A';
+  const cleanHex = hex.replace('#', '');
+  if (cleanHex.length !== 6) return '#FFFFFF';
+  const r = parseInt(cleanHex.substring(0, 2), 16);
+  const g = parseInt(cleanHex.substring(2, 4), 16);
+  const b = parseInt(cleanHex.substring(4, 6), 16);
+  const yiq = (r * 299 + g * 587 + b * 114) / 1000;
+  return yiq >= 145 ? '#0F172A' : '#FFFFFF';
+}
+
+/**
  * Custom SVG node renderer for Recharts Treemap.
+ * - depth 1: Bordered block groups with block name headers.
+ * - depth 2: Inverter tiles with dynamic text contrast and rich tooltips.
  */
 function TreemapContentNode({
   x,
@@ -49,82 +65,156 @@ function TreemapContentNode({
   name,
   pr,
   size,
+  rated_kw,
   block,
+  blockBounds = {},
   onSelectInverter,
+  onHoverTile,
+  onMoveTile,
+  onLeaveTile,
 }) {
   if (depth === 1) {
-    // Block container level: render container outline with block label
+    // Record block coordinates for positioning children
+    if (name) {
+      blockBounds[name] = { x, y, width, height };
+    }
+    const headerHeight = Math.min(24, Math.max(16, height * 0.18));
+
     return (
-      <g>
+      <g className="treemap-block-group select-none">
+        {/* Outer bordered group container */}
         <rect
           x={x}
           y={y}
           width={width}
           height={height}
-          style={{
-            fill: '#F8FAFC',
-            stroke: '#CBD5E1',
-            strokeWidth: 2,
-          }}
+          fill="#F8FAFC"
+          stroke="#475569"
+          strokeWidth={2}
+          rx={6}
         />
-        {width > 60 && height > 20 && (
-          <text
-            x={x + 6}
-            y={y + 14}
-            fill="#64748B"
-            fontSize={10}
-            fontWeight={600}
-            className="pointer-events-none select-none uppercase tracking-wider"
-          >
-            {name}
-          </text>
+        {/* Block name header banner */}
+        {width > 28 && height > 14 && (
+          <g>
+            <rect
+              x={x}
+              y={y}
+              width={width}
+              height={headerHeight}
+              fill="#E2E8F0"
+              stroke="#475569"
+              strokeWidth={1}
+              rx={5}
+            />
+            <text
+              x={x + 8}
+              y={y + headerHeight - 7}
+              fill="#0F172A"
+              fontSize={11}
+              fontWeight={700}
+              letterSpacing="0.05em"
+              className="pointer-events-none uppercase"
+            >
+              {name}
+            </text>
+          </g>
         )}
       </g>
     );
   }
 
-  // Leaf level: inverter
+  // Leaf level: inverter tile (depth >= 2)
   const color = getPrHeatmapColor(pr);
+  const textColor = getContrastingTextColor(color);
+  const isDarkText = textColor === '#0F172A';
+  const subtextColor = isDarkText ? '#334155' : '#F8FAFC';
   const prPct = pr !== null && pr !== undefined ? (pr <= 1 ? pr * 100 : pr).toFixed(1) : null;
   const isClickable = Boolean(name && depth >= 2);
+  const ratedKwVal = rated_kw || size || 1000;
+
+  // Inset leaf tiles inside their block container below the block header
+  const b = block && blockBounds[block];
+  let tileX = x + 1;
+  let tileY = y + 1;
+  let tileW = Math.max(4, width - 2);
+  let tileH = Math.max(4, height - 2);
+
+  if (b && b.height > 44 && b.width > 44) {
+    const headerH = Math.min(24, Math.max(16, b.height * 0.18));
+    const pad = 3;
+    const innerX = b.x + pad;
+    const innerY = b.y + headerH + pad;
+    const innerW = b.width - pad * 2;
+    const innerH = b.height - headerH - pad * 2;
+
+    const normX = (x - b.x) / b.width;
+    const normY = (y - b.y) / b.height;
+    const normW = width / b.width;
+    const normH = height / b.height;
+
+    tileX = innerX + normX * innerW + 1;
+    tileY = innerY + normY * innerH + 1;
+    tileW = Math.max(4, normW * innerW - 2);
+    tileH = Math.max(4, normH * innerH - 2);
+  }
 
   return (
     <g
       onClick={() => isClickable && onSelectInverter(name)}
+      onMouseEnter={(e) => {
+        if (onHoverTile) {
+          onHoverTile({
+            inverter: name,
+            block: block || '—',
+            pr: prPct !== null ? `${prPct}%` : 'N/A',
+            rated_kw: ratedKwVal,
+            x: e.clientX,
+            y: e.clientY,
+          });
+        }
+      }}
+      onMouseMove={(e) => {
+        if (onMoveTile) onMoveTile(e.clientX, e.clientY);
+      }}
+      onMouseLeave={() => {
+        if (onLeaveTile) onLeaveTile();
+      }}
       className={isClickable ? 'cursor-pointer group' : ''}
     >
+      <title>{`Inverter: ${name}\nBlock: ${block || '—'}\nPR: ${prPct !== null ? `${prPct}%` : 'N/A'}\nRated: ${ratedKwVal} kW`}</title>
       <rect
-        x={x}
-        y={y}
-        width={width}
-        height={height}
+        x={tileX}
+        y={tileY}
+        width={tileW}
+        height={tileH}
         style={{
           fill: color,
-          stroke: '#FFFFFF',
-          strokeWidth: 1.5,
+          stroke: isDarkText ? '#CBD5E1' : '#FFFFFF',
+          strokeWidth: 1.2,
           rx: 3,
         }}
         className="transition-opacity group-hover:opacity-85"
       />
-      {width > 42 && height > 24 && (
+      {tileW > 40 && tileH > 22 && (
         <text
-          x={x + 4}
-          y={y + 13}
-          fill="#FFFFFF"
+          x={tileX + 4}
+          y={tileY + 13}
+          fill={textColor}
           fontSize={10}
           fontWeight={600}
-          className="pointer-events-none select-none drop-shadow-xs"
+          className="pointer-events-none select-none"
         >
           {name?.length > 12 ? name.slice(-6) : name}
         </text>
       )}
-      {width > 42 && height > 36 && prPct && (
+      {tileW > 40 && tileH > 34 && prPct && (
         <text
-          x={x + 4}
-          y={y + 25}
-          fill="#FFFFFF"
+          x={tileX + 4}
+          y={tileY + 25}
+          fill={subtextColor}
           fontSize={9}
-          className="pointer-events-none select-none opacity-90 drop-shadow-xs"
+          fontWeight={500}
+          className="pointer-events-none select-none opacity-95"
         >
           {prPct}%
         </text>
@@ -143,6 +233,9 @@ export default function PlantDetailView({
 }) {
   // Drawer state for inspecting single inverter
   const [activeInverterId, setActiveInverterId] = useState(null);
+  const [treemapHover, setTreemapHover] = useState(null);
+  const blockBoundsRef = useRef({});
+  blockBoundsRef.current = {};
 
   // TanStack Query for plant detail
   const isPlantSelected = Boolean(plantId) && plantId !== 'all';
@@ -177,7 +270,7 @@ export default function PlantDetailView({
     });
   }, [plantDetail?.blocks, plantMedianPr]);
 
-  // Transform Treemap data: hierarchy [ { name: block, children: [ { name: inv, size: rated_dc, pr } ] } ]
+  // Transform Treemap data: hierarchy [ { name: block, children: [ { name: inv, size: rated_dc, pr, rated_kw } ] } ]
   const treemapHierarchy = useMemo(() => {
     if (!plantDetail?.treemap || plantDetail.treemap.length === 0) return [];
     const blockMap = new Map();
@@ -192,8 +285,10 @@ export default function PlantDetailView({
       }
       blockMap.get(blk).children.push({
         name: item.inverter,
+        inverter: item.inverter,
         block: blk,
         size: Number(item.rated_dc_kw) || 1000,
+        rated_kw: item.rated_dc_kw || item.rated_ac_kw || item.size || 1000,
         pr: item.pr,
       });
     });
@@ -505,16 +600,46 @@ export default function PlantDetailView({
                 No topology records available for treemap rendering.
               </div>
             ) : (
-              <div className="h-80 w-full pt-2">
+              <div className="h-80 w-full pt-2 relative">
                 <ResponsiveContainer width="100%" height="100%">
                   <Treemap
                     data={treemapHierarchy}
                     dataKey="size"
                     aspectRatio={4 / 3}
                     stroke="#FFFFFF"
-                    content={<TreemapContentNode onSelectInverter={handleOpenDrawer} />}
+                    content={
+                      <TreemapContentNode
+                        blockBounds={blockBoundsRef.current}
+                        onSelectInverter={handleOpenDrawer}
+                        onHoverTile={(info) => setTreemapHover(info)}
+                        onMoveTile={(x, y) => setTreemapHover((prev) => (prev ? { ...prev, x, y } : null))}
+                        onLeaveTile={() => setTreemapHover(null)}
+                      />
+                    }
                   />
                 </ResponsiveContainer>
+
+                {/* Floating tooltip for inverter tile */}
+                {treemapHover && (
+                  <div
+                    className="fixed z-50 pointer-events-none bg-[#0F172A] text-white rounded-lg shadow-xl px-3 py-2 text-xs border border-slate-700 -translate-x-1/2 -translate-y-full"
+                    style={{ left: treemapHover.x, top: treemapHover.y - 10 }}
+                  >
+                    <div className="font-bold flex items-center justify-between gap-3">
+                      <span>{treemapHover.inverter}</span>
+                      {treemapHover.block && (
+                        <span className="text-[10px] bg-slate-800 text-slate-300 px-1.5 py-0.5 rounded">
+                          {treemapHover.block}
+                        </span>
+                      )}
+                    </div>
+                    <div className="mt-1 flex items-center gap-2.5 text-[11px] text-slate-300">
+                      <span>PR: <strong className="text-white">{treemapHover.pr}</strong></span>
+                      <span>•</span>
+                      <span>Rated: <strong className="text-white">{treemapHover.rated_kw} kW</strong></span>
+                    </div>
+                  </div>
+                )}
               </div>
             )}
           </Card>

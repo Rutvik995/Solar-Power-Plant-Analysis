@@ -33,6 +33,8 @@ import {
   CloudSun,
   Thermometer,
   Gauge,
+  Percent,
+  Droplets,
   Info,
 } from 'lucide-react';
 
@@ -48,6 +50,7 @@ import {
   Legend,
   CartesianGrid,
   ReferenceLine,
+  LabelList,
 } from 'recharts';
 
 // Glossary definitions for KPI ? tooltips
@@ -140,6 +143,11 @@ export default function DashboardPage() {
         start: dStart.toISOString().slice(0, 10),
         end: maxDate,
       });
+    } else if (preset === 'july') {
+      updateFilters({
+        start: '2026-07-01',
+        end: '2026-07-31',
+      });
     } else if (preset === 'august') {
       updateFilters({
         start: '2026-08-01',
@@ -149,6 +157,11 @@ export default function DashboardPage() {
       updateFilters({
         start: '2026-09-01',
         end: maxDate < '2026-09-30' ? maxDate : '2026-09-30',
+      });
+    } else if (preset === 'october') {
+      updateFilters({
+        start: '2026-10-01',
+        end: maxDate < '2026-10-31' ? maxDate : '2026-10-31',
       });
     } else if (preset === 'all') {
       updateFilters({
@@ -220,6 +233,16 @@ export default function DashboardPage() {
   }, [overview?.plants]);
 
   const fleetPrPct = overview?.fleet_pr ? Number((overview.fleet_pr * 100).toFixed(1)) : null;
+
+  // Dynamic PR x-axis domain from (min - 2) to (max + 1)
+  const prDomain = useMemo(() => {
+    if (!sortedPrChartData || sortedPrChartData.length === 0) return [60, 100];
+    const vals = sortedPrChartData.map((p) => p.pr);
+    if (fleetPrPct) vals.push(fleetPrPct);
+    const minVal = Math.floor(Math.min(...vals)) - 2;
+    const maxVal = Math.ceil(Math.max(...vals)) + 1;
+    return [Math.max(0, minVal), Math.min(100, maxVal)];
+  }, [sortedPrChartData, fleetPrPct]);
 
   // Handle plant row click -> set plant and switch to Plant detail tab
   const handlePlantClick = (plantId) => {
@@ -295,8 +318,10 @@ export default function DashboardPage() {
                 { id: 'last7', label: '7D' },
                 { id: 'last28', label: '28D' },
                 { id: 'last30', label: '30D' },
+                { id: 'july', label: 'July' },
                 { id: 'august', label: 'August' },
                 { id: 'september', label: 'September' },
+                { id: 'october', label: 'October' },
                 { id: 'all', label: 'All' },
               ].map((p) => (
                 <button
@@ -385,7 +410,7 @@ export default function DashboardPage() {
               onRetry={refetchOverview}
             />
           ) : (
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-7 gap-3.5">
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 min-[1400px]:grid-cols-7 gap-3.5">
               {/* 1. Energy */}
               <KpiCard
                 title="Energy"
@@ -418,7 +443,7 @@ export default function DashboardPage() {
                 tooltip={KPI_GLOSSARY.pr}
                 sparklineData={overview?.kpis?.pr?.sparkline || []}
                 sparklineColor="#0D9488"
-                icon={Activity}
+                icon={Gauge}
                 loading={overviewLoading}
               />
 
@@ -452,7 +477,7 @@ export default function DashboardPage() {
                 previousValue={compare ? overview?.kpis?.capacity_factor?.previous : undefined}
                 deltaIsGood={true}
                 tooltip={KPI_GLOSSARY.capacityFactor}
-                icon={Layers}
+                icon={Percent}
                 loading={overviewLoading}
               />
 
@@ -470,7 +495,7 @@ export default function DashboardPage() {
                 deltaIsGood={true}
                 invertDelta={true}
                 tooltip={KPI_GLOSSARY.soilingLoss}
-                icon={AlertTriangle}
+                icon={Droplets}
                 loading={overviewLoading}
               />
 
@@ -505,7 +530,7 @@ export default function DashboardPage() {
                 deltaIsGood={true}
                 invertDelta={true}
                 tooltip={KPI_GLOSSARY.openAlerts}
-                icon={ShieldAlert}
+                icon={AlertTriangle}
                 loading={overviewLoading}
               />
             </div>
@@ -548,12 +573,12 @@ export default function DashboardPage() {
                     <BarChart
                       data={sortedPrChartData}
                       layout="vertical"
-                      margin={{ top: 10, right: 30, left: 10, bottom: 5 }}
+                      margin={{ top: 25, right: 45, left: 15, bottom: 5 }}
                     >
                       <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#E2E8F0" />
                       <XAxis
                         type="number"
-                        domain={[60, 100]}
+                        domain={prDomain}
                         unit="%"
                         tick={{ fontSize: 11, fill: '#64748B' }}
                         stroke="#E2E8F0"
@@ -563,7 +588,7 @@ export default function DashboardPage() {
                         dataKey="name"
                         tick={{ fontSize: 11, fill: '#0F172A', fontWeight: 500 }}
                         stroke="#E2E8F0"
-                        width={85}
+                        width={125}
                       />
                       <Tooltip
                         content={({ active, payload }) => {
@@ -585,9 +610,11 @@ export default function DashboardPage() {
                           strokeDasharray="4 4"
                           label={{
                             value: `Fleet ${fleetPrPct}%`,
-                            fill: '#64748B',
+                            fill: '#0F172A',
                             fontSize: 10,
+                            fontWeight: 600,
                             position: 'top',
+                            dy: -8,
                           }}
                         />
                       )}
@@ -597,7 +624,16 @@ export default function DashboardPage() {
                         radius={[0, 4, 4, 0]}
                         onClick={(entry) => handlePlantClick(entry.plant_id)}
                         className="cursor-pointer"
-                      />
+                      >
+                        <LabelList
+                          dataKey="pr"
+                          position="right"
+                          formatter={(v) => `${v}%`}
+                          fill="#0F172A"
+                          fontSize={11}
+                          fontWeight={600}
+                        />
+                      </Bar>
                     </BarChart>
                   </ResponsiveContainer>
                 </div>

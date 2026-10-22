@@ -145,7 +145,7 @@ export default function InverterDrawer({
 
       {/* Slide-out Drawer Panel */}
       <aside
-        className="absolute inset-y-0 right-0 w-[420px] max-w-full bg-white border-l border-[#E2E8F0] shadow-2xl flex flex-col z-10"
+        className="fixed inset-y-0 right-0 h-screen w-[420px] max-w-full bg-white border-l border-[#E2E8F0] shadow-2xl flex flex-col z-50"
         role="dialog"
         aria-modal="true"
         aria-label={`Inverter ${inverterId} details`}
@@ -269,9 +269,9 @@ export default function InverterDrawer({
                   <span className="text-xs font-semibold text-[#0F172A]">PR vs Block Peer Median</span>
                   <span className="text-[10px] text-[#64748B]">Dashed = Block median</span>
                 </div>
-                <div className="h-44 w-full bg-white border border-[#E2E8F0] rounded-lg p-2">
+                <div className="h-44 w-full bg-white border border-[#E2E8F0] rounded-lg p-2.5">
                   <ResponsiveContainer width="100%" height="100%">
-                    <LineChart data={combinedDaily} margin={{ top: 5, right: 10, left: -20, bottom: 0 }}>
+                    <LineChart data={combinedDaily} margin={{ top: 8, right: 12, left: 0, bottom: 4 }}>
                       <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#E2E8F0" />
                       <XAxis
                         dataKey="date"
@@ -279,9 +279,11 @@ export default function InverterDrawer({
                         tickFormatter={(v) => v.slice(5)}
                       />
                       <YAxis
+                        width={35}
                         unit="%"
                         domain={[0, 100]}
                         tick={{ fontSize: 9, fill: '#64748B' }}
+                        stroke="#94A3B8"
                       />
                       <Tooltip
                         content={({ active, payload, label }) => {
@@ -298,6 +300,7 @@ export default function InverterDrawer({
                           );
                         }}
                       />
+                      <Legend verticalAlign="top" align="right" wrapperStyle={{ fontSize: 10, paddingBottom: 6 }} />
                       <Line
                         type="monotone"
                         dataKey="pr_pct"
@@ -310,10 +313,11 @@ export default function InverterDrawer({
                         type="monotone"
                         dataKey="peer_pr_pct"
                         name="Peer Median PR"
-                        stroke="#64748B"
-                        strokeDasharray="4 4"
-                        strokeWidth={1.5}
-                        dot={false}
+                        stroke="#0F172A"
+                        strokeDasharray="5 4"
+                        strokeWidth={2.5}
+                        dot={{ r: 2, fill: '#0F172A', strokeWidth: 0 }}
+                        activeDot={{ r: 4, stroke: '#0F172A' }}
                       />
                     </LineChart>
                   </ResponsiveContainer>
@@ -325,23 +329,28 @@ export default function InverterDrawer({
                 <span className="text-xs font-semibold text-[#0F172A] block mb-1.5">
                   Daily Yield (kWh)
                 </span>
-                <div className="h-36 w-full bg-white border border-[#E2E8F0] rounded-lg p-2">
+                <div className="h-44 w-full bg-white border border-[#E2E8F0] rounded-lg p-2.5">
                   <ResponsiveContainer width="100%" height="100%">
-                    <ComposedChart data={combinedDaily} margin={{ top: 5, right: 10, left: -15, bottom: 0 }}>
+                    <ComposedChart data={combinedDaily} margin={{ top: 8, right: 12, left: 0, bottom: 4 }}>
                       <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#E2E8F0" />
                       <XAxis
                         dataKey="date"
                         tick={{ fontSize: 9, fill: '#64748B' }}
                         tickFormatter={(v) => v.slice(5)}
                       />
-                      <YAxis tick={{ fontSize: 9, fill: '#2563EB' }} />
+                      <YAxis
+                        width={42}
+                        tick={{ fontSize: 9, fill: '#2563EB' }}
+                        tickFormatter={(v) => (v >= 1000 ? `${(v / 1000).toFixed(1)}k` : v)}
+                        stroke="#94A3B8"
+                      />
                       <Tooltip
                         content={({ active, payload, label }) => {
                           if (!active || !payload?.length) return null;
                           return (
                             <div className="bg-white border border-[#E2E8F0] shadow-md rounded p-1.5 text-[11px]">
                               <p className="font-semibold text-[#0F172A]">{label}</p>
-                              <p className="text-[#2563EB]">Yield: {payload[0]?.value} kWh</p>
+                              <p className="text-[#2563EB] font-medium">Yield: {payload[0]?.value?.toLocaleString()} kWh</p>
                             </div>
                           );
                         }}
@@ -359,7 +368,7 @@ export default function InverterDrawer({
                 </span>
                 <div className="h-40 w-full bg-white border border-[#E2E8F0] rounded-lg p-2">
                   <ResponsiveContainer width="100%" height="100%">
-                    <LineChart data={combinedDaily} margin={{ top: 5, right: 15, left: -20, bottom: 0 }}>
+                    <LineChart data={combinedDaily} margin={{ top: 8, right: 12, left: 0, bottom: 4 }}>
                       <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#E2E8F0" />
                       <XAxis
                         dataKey="date"
@@ -369,12 +378,14 @@ export default function InverterDrawer({
                       <YAxis
                         yAxisId="volt"
                         unit="V"
+                        width={35}
                         tick={{ fontSize: 9, fill: '#2563EB' }}
                         stroke="#2563EB"
                       />
                       <YAxis
                         yAxisId="curr"
                         unit="A"
+                        width={32}
                         orientation="right"
                         tick={{ fontSize: 9, fill: '#D97706' }}
                         stroke="#D97706"
