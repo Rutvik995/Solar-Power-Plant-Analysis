@@ -321,14 +321,14 @@ Located sticky at the top of the analytics dashboard:
 
 #### 1. Seven High-Level KPI Cards
 Rendered in a responsive 4 + 3 grid on screens under 1400px:
-1. **Energy Generated (MWh)**: Total AC electrical power delivered.
-2. **Performance Ratio ($PR\ %$)**: Weather-adjusted efficiency with historical teal sparkline.
-3. **Specific Yield ($\text{kWh/kWp}$)**: Generation normalized by DC size.
-4. **Capacity Factor ($\%$)**: 24-hour plant utilization factor.
-5. **Soiling Loss ($\%$)**: Generation penalty from dusty panels (inverted red/green delta logic).
-6. **Availability ($\%$)**: Uptime fraction of inverters ready to generate.
-7. **Open Alerts**: Flagged inverter-day count (zero-gen or status faults; inverted delta logic).
-- **Interactive Glossary Tooltips**: Hovering the `(?)` icon reveals plain-English definitions from `glossary.yaml`. Tooltip icon is placed inline with labels to prevent badge collisions.
+1. **Energy Generated (MWh)**: Total AC electrical power delivered (Icon: `Zap`).
+2. **Performance Ratio ($PR\ %$)**: Weather-adjusted efficiency with historical teal sparkline (Icon: `Gauge`).
+3. **Specific Yield ($\text{kWh/kWp}$)**: Generation normalized by DC size (Icon: `Sun`).
+4. **Capacity Factor ($\%$)**: 24-hour plant utilization factor (Icon: `Percent`).
+5. **Soiling Loss ($\%$)**: Generation penalty from dusty panels; inverted red/green delta logic (Icon: `Droplets`).
+6. **Availability ($\%$)**: Uptime fraction of inverters ready to generate (Icon: `CheckCircle2`).
+7. **Open Alerts**: Flagged inverter-day count (zero-gen or status faults; inverted delta logic; Icon: `AlertTriangle`).
+- **Interactive Glossary Tooltips**: Hovering the `(?)` icon reveals plain-English definitions from `glossary.yaml`. Tooltip icon is placed inline with labels to prevent badge collisions across responsive breakpoints.
 
 #### 2. Fleet PR Benchmark Bar Chart
 - X-axis bounded dynamically to $[\min - 2, \max + 1]\%$.
