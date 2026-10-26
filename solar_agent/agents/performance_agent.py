@@ -13,8 +13,8 @@ Allowed tools: compute_kpis_tool, rank_entities_tool, compare_periods_tool, tren
 from __future__ import annotations
 
 from langchain_core.tools import tool
-from typing import Optional
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from typing import Any, Optional
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from solar_agent.agents.base_agent import SingleCallAgent
 from solar_agent.prompts.agent_prompts import PERFORMANCE_AGENT_PROMPT
@@ -31,6 +31,30 @@ class ComputeKpisSchema(BaseModel):
     data_ref: str
     level: Optional[str] = Field(default="plant", alias="aggregation_level")
     period: Optional[str] = Field(default="total", alias="time_period")
+
+    @field_validator("period", mode="before")
+    @classmethod
+    def _coerce_period(cls, v: Any) -> str:
+        if isinstance(v, (list, tuple)):
+            return "total"
+        if not v:
+            return "total"
+        v_str = str(v).lower()
+        if v_str in ("daily", "total"):
+            return v_str
+        return "total"
+
+    @field_validator("level", mode="before")
+    @classmethod
+    def _coerce_level(cls, v: Any) -> str:
+        if isinstance(v, (list, tuple)):
+            return "plant"
+        if not v:
+            return "plant"
+        v_str = str(v).lower()
+        if v_str in ("inverter", "block", "plant"):
+            return v_str
+        return "plant"
 
     @model_validator(mode="after")
     def _coerce_none(self) -> "ComputeKpisSchema":

@@ -100,6 +100,9 @@ def _hash_request(messages: list[BaseMessage], model_name: str = "", tool_schema
     return hashlib.md5(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()
 
 
+_hash_messages = _hash_request
+
+
 class ReplayLLM:
     """
     Wraps an LLM to record responses to a JSON cache or replay them without quota.

@@ -16,6 +16,7 @@ Allowed tools: detect_zero_generation_tool, detect_status_faults_tool,
 
 from __future__ import annotations
 
+from typing import Optional
 from langchain_core.tools import tool
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -30,12 +31,17 @@ from solar_agent.tools.fault_tools import (
 
 
 class DetectZeroGenerationSchema(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
     data_ref: str
     irradiance_threshold_kwh_m2: float = Field(default=0.5)
+    inverter_ids: Optional[list[str]] = None
 
 @tool(args_schema=DetectZeroGenerationSchema)
-def detect_zero_generation_tool(data_ref: str, irradiance_threshold_kwh_m2: float = 0.5) -> dict:
+def detect_zero_generation_tool(
+    data_ref: str,
+    irradiance_threshold_kwh_m2: float = 0.5,
+    inverter_ids: Optional[list[str]] = None,
+) -> dict:
     """
     Identify inverter-days where yield is 0 kWh despite sufficient irradiance.
     Inverters in standby (exclude_from_yield_check) are skipped.
@@ -43,50 +49,71 @@ def detect_zero_generation_tool(data_ref: str, irradiance_threshold_kwh_m2: floa
     Args:
         data_ref: DataStore key to the fetched telemetry DataFrame.
         irradiance_threshold_kwh_m2: Minimum irradiance to flag a zero-yield day (default 0.5).
+        inverter_ids: Optional list of inverter IDs to filter to.
     """
-    return detect_zero_generation(data_ref, irradiance_threshold_kwh_m2=irradiance_threshold_kwh_m2)
+    return detect_zero_generation(
+        data_ref,
+        irradiance_threshold_kwh_m2=irradiance_threshold_kwh_m2,
+        inverter_ids=inverter_ids,
+    )
 
 
 class DetectStatusFaultsSchema(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
     data_ref: str
+    inverter_ids: Optional[list[str]] = None
 
 @tool(args_schema=DetectStatusFaultsSchema)
-def detect_status_faults_tool(data_ref: str) -> dict:
+def detect_status_faults_tool(
+    data_ref: str,
+    inverter_ids: Optional[list[str]] = None,
+) -> dict:
     """
     Identify inverter-days with fault/warning/offline status codes (>= 2).
     Computes per-inverter consecutive streaks.
 
     Args:
         data_ref: DataStore key to the fetched telemetry DataFrame.
+        inverter_ids: Optional list of inverter IDs to filter to.
     """
-    return detect_status_faults(data_ref)
+    return detect_status_faults(data_ref, inverter_ids=inverter_ids)
 
 
 class DetectPeerUnderperformanceSchema(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
     data_ref: str
+    inverter_ids: Optional[list[str]] = None
 
 @tool(args_schema=DetectPeerUnderperformanceSchema)
-def detect_peer_underperformance_tool(data_ref: str) -> dict:
+def detect_peer_underperformance_tool(
+    data_ref: str,
+    inverter_ids: Optional[list[str]] = None,
+) -> dict:
     """
     Flag inverters whose PR z-score vs block-median falls below the configured
     threshold for the configured minimum number of days.
 
     Args:
         data_ref: DataStore key to the fetched telemetry DataFrame.
+        inverter_ids: Optional list of inverter IDs to filter to.
     """
-    return detect_peer_underperformance(data_ref)
+    return detect_peer_underperformance(data_ref, inverter_ids=inverter_ids)
 
 
 class DetectAnomaliesSchema(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
     data_ref: str
     z_threshold: float = Field(default=3.0)
     window: int = Field(default=14)
+    inverter_ids: Optional[list[str]] = None
 
 @tool(args_schema=DetectAnomaliesSchema)
-def detect_anomalies_tool(data_ref: str, z_threshold: float = 3.0, window: int = 14) -> dict:
+def detect_anomalies_tool(
+    data_ref: str,
+    z_threshold: float = 3.0,
+    window: int = 14,
+    inverter_ids: Optional[list[str]] = None,
+) -> dict:
     """
     Statistical anomaly detection using rolling z-score on PR, DC voltage, and DC current.
 
@@ -94,8 +121,9 @@ def detect_anomalies_tool(data_ref: str, z_threshold: float = 3.0, window: int =
         data_ref:    DataStore key to the fetched telemetry DataFrame.
         z_threshold: Rolling z-score threshold for flagging (default 3.0).
         window:      Rolling window size in days (default 7).
+        inverter_ids: Optional list of inverter IDs to filter to.
     """
-    return detect_anomalies(data_ref, z_threshold=z_threshold, window=window)
+    return detect_anomalies(data_ref, z_threshold=z_threshold, window=window, inverter_ids=inverter_ids)
 
 
 class FaultAgent(BaseSpecialistAgent):

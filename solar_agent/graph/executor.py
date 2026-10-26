@@ -269,6 +269,23 @@ class Executor:
                             )
                             continue
 
+                        # If fault or environment agent was assigned an aggregated KPI frame (missing log_date or irradiance),
+                        # check if another dependency produced raw daily telemetry and re-route:
+                        if task.agent in ("fault", "environment") and ("log_date" not in df.columns or "total_solar_radiation_kwh_m2" not in df.columns):
+                            for dep_id in task.depends_on:
+                                dep_tr = results.get(dep_id)
+                                if dep_tr and dep_tr.data_ref and dep_tr.data_ref != task_data_ref:
+                                    cand_df = DataStore.get_or_load(dep_tr.data_ref)
+                                    if cand_df is not None and "log_date" in cand_df.columns and "total_solar_radiation_kwh_m2" in cand_df.columns:
+                                        logger.info(
+                                            "Executor: Task '%s' (%s) re-routed data_ref from '%s' to '%s' (daily telemetry from '%s').",
+                                            task.id, task.agent, task_data_ref, dep_tr.data_ref, dep_id,
+                                        )
+                                        task_data_ref = dep_tr.data_ref
+                                        inputs["data_ref"] = task_data_ref
+                                        df = cand_df
+                                        break
+
                 agent = self._agents.get(task.agent)
                 if agent is None:
                     new_results[task.id] = TaskResult(

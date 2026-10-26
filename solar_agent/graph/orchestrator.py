@@ -365,6 +365,25 @@ def _normalize_scope_and_tasks(payload: dict, query: str, prev_scope: dict | Non
                     t_in["named_inverter_ids"] = named_inverter_ids
                     task["inputs"] = t_in
 
+        # Ensure fault and environment tasks use raw daily telemetry data_ref from the data task (e.g. $t1.data_ref),
+        # not intermediate/aggregated KPI tables from performance tasks (e.g. $t2.data_ref)
+        data_task_id = "t1"
+        for t in tasks:
+            if isinstance(t, dict) and t.get("agent") == "data":
+                data_task_id = t.get("id", "t1")
+                break
+
+        for t in tasks:
+            if isinstance(t, dict) and t.get("agent") in ("fault", "environment"):
+                t_in = t.get("inputs") or {}
+                dref = t_in.get("data_ref")
+                if not dref or (isinstance(dref, str) and dref.startswith("$") and not dref.startswith(f"${data_task_id}.")):
+                    t_in["data_ref"] = f"${data_task_id}.data_ref"
+                t["inputs"] = t_in
+                deps = t.get("depends_on") or []
+                if data_task_id not in deps:
+                    t["depends_on"] = [data_task_id] + [d for d in deps if d != data_task_id]
+
         if payload.get("intent") == "overview" and len(tasks) > 1:
             t2 = tasks[1]
             if isinstance(t2, dict) and t2.get("agent") == "performance":

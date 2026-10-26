@@ -9,7 +9,7 @@ and statistical anomalies (rolling z-score).
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Optional
 
 import numpy as np
 import pandas as pd
@@ -48,21 +48,42 @@ def detect_zero_generation(
     if df is None or df.empty:
         return {"summary": "No data for zero-generation check.", "warnings": ["Empty/missing data"]}
 
+    warnings: list[str] = []
+
     # Apply irradiance guard (BR-01)
     thresh = irradiance_threshold_kwh_m2 if irradiance_threshold_kwh_m2 is not None else settings.min_irradiance_kwh_m2
-    mask_h = df["total_solar_radiation_kwh_m2"] > thresh
+    if "total_solar_radiation_kwh_m2" in df.columns:
+        mask_h = df["total_solar_radiation_kwh_m2"] > thresh
+    elif "peak_poa_irradiance_w_m2" in df.columns:
+        # Fallback to peak irradiance guard if total radiation column is missing
+        mask_h = df["peak_poa_irradiance_w_m2"] > (thresh * 100)
+        warnings.append("Used peak_poa_irradiance_w_m2 fallback for irradiance check.")
+    else:
+        mask_h = pd.Series(True, index=df.index)
+        warnings.append("Irradiance column 'total_solar_radiation_kwh_m2' not present in data; zero-generation evaluated on yield only.")
     
     # Exclude specific statuses (like Standby = 1) from zero-generation check
-    mask_status = ~df["status_code"].isin(_EXCLUDE_YIELD_CODES)
+    if "status_code" in df.columns:
+        mask_status = ~df["status_code"].isin(_EXCLUDE_YIELD_CODES)
+    else:
+        mask_status = pd.Series(True, index=df.index)
     
     # Check yield threshold
-    mask_yield = df["total_daily_yield_kwh"] <= settings.zero_generation_max_yield_kwh
+    if "total_daily_yield_kwh" in df.columns:
+        mask_yield = df["total_daily_yield_kwh"] <= settings.zero_generation_max_yield_kwh
+    else:
+        return {
+            "summary": "Cannot evaluate zero generation: 'total_daily_yield_kwh' column missing.",
+            "metrics": {"fault_count": 0},
+            "data_ref": DataStore.store(pd.DataFrame()),
+            "warnings": ["Missing 'total_daily_yield_kwh' column"],
+        }
     
     # Identify faults
     faults_df = df[mask_h & mask_status & mask_yield].copy()
 
     # Filter to named inverter after computing baseline across full data
-    if inverter_ids:
+    if inverter_ids and "inverter_id" in faults_df.columns:
         faults_df = faults_df[faults_df["inverter_id"].isin(inverter_ids)].copy()
     
     res_ref = DataStore.store(faults_df)
@@ -71,7 +92,7 @@ def detect_zero_generation(
         "summary": f"Detected {len(faults_df)} instances of unexpected zero generation.",
         "metrics": {"fault_count": len(faults_df)},
         "data_ref": res_ref,
-        "warnings": [],
+        "warnings": warnings,
     }
 
 
@@ -82,6 +103,14 @@ def detect_status_faults(data_ref: str, inverter_ids: Optional[list[str]] = None
     df = DataStore.get_or_load(data_ref)
     if df is None or df.empty:
         return {"summary": "No data for status fault check.", "warnings": ["Empty/missing data"]}
+
+    if "status_code" not in df.columns:
+        return {
+            "summary": "No status_code column found in data; no explicit status faults detected.",
+            "metrics": {"fault_count": 0, "max_streak": 0},
+            "data_ref": DataStore.store(pd.DataFrame()),
+            "warnings": ["'status_code' column not present in input data"],
+        }
 
     # Filter to only known fault codes
     faults = df[df["status_code"].isin(_FAULT_CODES)].copy()
@@ -94,23 +123,20 @@ def detect_status_faults(data_ref: str, inverter_ids: Optional[list[str]] = None
             "warnings": [],
         }
 
-    # Sort by inverter and date to count streaks
-    faults = faults.sort_values(by=["inverter_id", "log_date"])
-    
-    # Calculate consecutive days using date diffs
-    faults["prev_date"] = faults.groupby("inverter_id")["log_date"].shift(1)
-    faults["is_consecutive"] = (
-        pd.to_datetime(faults["log_date"]) - pd.to_datetime(faults["prev_date"])
-    ).dt.days == 1
-    
-    # Assign a streak ID (increments when NOT consecutive)
-    faults["streak_id"] = (~faults["is_consecutive"]).groupby(faults["inverter_id"]).cumsum()
-    
-    # Calculate streak length
-    faults["streak_length_days"] = faults.groupby(["inverter_id", "streak_id"])["log_date"].transform("count")
+    # Sort by inverter and date to count streaks if available
+    if "inverter_id" in faults.columns and "log_date" in faults.columns:
+        faults = faults.sort_values(by=["inverter_id", "log_date"])
+        faults["prev_date"] = faults.groupby("inverter_id")["log_date"].shift(1)
+        faults["is_consecutive"] = (
+            pd.to_datetime(faults["log_date"]) - pd.to_datetime(faults["prev_date"])
+        ).dt.days == 1
+        faults["streak_id"] = (~faults["is_consecutive"]).groupby(faults["inverter_id"]).cumsum()
+        faults["streak_length_days"] = faults.groupby(["inverter_id", "streak_id"])["log_date"].transform("count")
+    else:
+        faults["streak_length_days"] = 1
 
     # Filter to named inverter after computing streaks across full data
-    if inverter_ids:
+    if inverter_ids and "inverter_id" in faults.columns:
         faults = faults[faults["inverter_id"].isin(inverter_ids)].copy()
 
     res_ref = DataStore.store(faults)
@@ -140,11 +166,24 @@ def detect_peer_underperformance(
         return {"summary": "No data for peer underperformance check.", "warnings": ["Empty/missing data"]}
 
     # We need PR to compute peer deviation
-    if "performance_ratio" not in df.columns:
-        df = m.compute_performance_ratio(df)
-        
-    # Compute the score across all peers in the block first
-    df = m.compute_peer_deviation(df)
+    if "peer_deviation_score" not in df.columns:
+        if "performance_ratio" not in df.columns:
+            try:
+                df = m.compute_performance_ratio(df)
+            except Exception:
+                pass
+        try:
+            df = m.compute_peer_deviation(df)
+        except Exception:
+            pass
+
+    if "peer_deviation_score" not in df.columns:
+        return {
+            "summary": "Could not compute peer deviation scores on input data.",
+            "metrics": {"underperformer_count": 0},
+            "data_ref": DataStore.store(pd.DataFrame()),
+            "warnings": ["'peer_deviation_score' could not be evaluated."],
+        }
     
     # Filter to severe underperformers
     threshold = -settings.peer_underperformance_z_threshold
@@ -158,7 +197,7 @@ def detect_peer_underperformance(
             "warnings": [],
         }
         
-    if min_consecutive_days > 1:
+    if min_consecutive_days > 1 and "log_date" in bad.columns and "inverter_id" in bad.columns:
         # Sort and count streaks
         bad = bad.sort_values(["inverter_id", "log_date"])
         bad["prev_date"] = bad.groupby("inverter_id")["log_date"].shift(1)
@@ -170,7 +209,7 @@ def detect_peer_underperformance(
         bad = bad[bad["streak_len"] >= min_consecutive_days]
 
     # Filter to named inverter after computing peer baselines
-    if inverter_ids:
+    if inverter_ids and "inverter_id" in bad.columns:
         bad = bad[bad["inverter_id"].isin(inverter_ids)].copy()
 
     res_ref = DataStore.store(bad)
@@ -203,17 +242,34 @@ def detect_anomalies(
 
     # Ensure PR exists if requested
     if "performance_ratio" in columns and "performance_ratio" not in df.columns:
-        df = m.compute_performance_ratio(df)
+        try:
+            df = m.compute_performance_ratio(df)
+        except Exception:
+            pass
+
+    if "inverter_id" not in df.columns or "log_date" not in df.columns:
+        return {
+            "summary": "Cannot run rolling anomaly detection without 'inverter_id' and 'log_date' columns.",
+            "metrics": {"total_anomalies": 0},
+            "data_ref": DataStore.store(pd.DataFrame()),
+            "warnings": ["Missing 'inverter_id' or 'log_date' columns for anomaly detection."],
+        }
+
+    available_cols = [c for c in columns if c in df.columns]
+    if not available_cols:
+        return {
+            "summary": "No suitable numerical columns found for anomaly detection.",
+            "metrics": {"total_anomalies": 0},
+            "data_ref": DataStore.store(pd.DataFrame()),
+            "warnings": ["No matching columns found for anomaly detection."],
+        }
 
     df = df.sort_values(by=["inverter_id", "log_date"]).copy()
     anomalies_found = 0
     
-    for col in columns:
-        if col not in df.columns:
-            continue
-            
+    for col in available_cols:
         # Rolling mean and std dev per inverter
-        roll = df.groupby("inverter_id")[col].rolling(window_days, min_periods=window_days//2)
+        roll = df.groupby("inverter_id")[col].rolling(window_days, min_periods=max(1, window_days//2))
         mean_col = f"{col}_roll_mean"
         std_col = f"{col}_roll_std"
         
@@ -230,12 +286,12 @@ def detect_anomalies(
         # Flag anomalies
         flag_col = f"{col}_is_anomaly"
         df[flag_col] = df[z_col].abs() > z_threshold
-        if inverter_ids:
+        if inverter_ids and "inverter_id" in df.columns:
             anomalies_found += df[df["inverter_id"].isin(inverter_ids)][flag_col].sum()
         else:
             anomalies_found += df[flag_col].sum()
 
-    if inverter_ids:
+    if inverter_ids and "inverter_id" in df.columns:
         df = df[df["inverter_id"].isin(inverter_ids)].copy()
 
     res_ref = DataStore.store(df)
