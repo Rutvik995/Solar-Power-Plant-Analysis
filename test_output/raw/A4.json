@@ -1,0 +1,4 @@
+{
+  "details": "Headline: **Block A of Plant 1 has five inverters, but their individual identifiers aren\u2019t provided in the data.**",
+  "got": "Found 3/5 inverters, has_1500=False"
+}

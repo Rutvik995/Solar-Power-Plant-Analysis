@@ -1,0 +1,4 @@
+{
+  "details": "Headline: **No faulty inverters were detected in Plant 1.**",
+  "got": "has_inv=True, has_date=True, has_status=True, unverified_cause=False"
+}

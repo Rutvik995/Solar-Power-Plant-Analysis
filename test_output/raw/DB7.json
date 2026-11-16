@@ -1,0 +1,4 @@
+{
+  "details": "Data quality: [{'plant_id': 1, 'rows': 1140, 'missing_days': 0, 'null_counts': 0}, {'plant_id': 2, 'rows': 1710, 'missing_days': 0, 'null_counts': 0}, {'plant_id': 3, 'rows': 684, 'missing_days': 0, 'null_counts': 0}, {'plant_id': 4, 'rows': 1368, 'missing_days': 0, 'null_counts': 0}, {'plant_id': 5, 'rows': 1710, 'missing_days': 0, 'null_counts': 0}]",
+  "got": "total_rows=6612"
+}

@@ -1,0 +1,4 @@
+{
+  "details": "Headline: **The inverter generated zero power on 16 Sep 2026, causing it to fail.**",
+  "got": "peer_pr=True, irr=True, no_0v0=True, unverified_cause=False"
+}

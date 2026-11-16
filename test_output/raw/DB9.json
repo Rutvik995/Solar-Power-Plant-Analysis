@@ -1,0 +1,4 @@
+{
+  "details": "Worst: ['P1_Block_A_INV_02', 'P1_Block_A_INV_01', 'P1_Block_A_INV_03', 'P1_Block_A_INV_04', 'P1_Block_A_INV_05']",
+  "got": "best_desc=True, worst_asc=True, bottom[0]=P1_Block_A_INV_02"
+}

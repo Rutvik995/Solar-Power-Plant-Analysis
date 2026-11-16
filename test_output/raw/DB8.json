@@ -1,0 +1,4 @@
+{
+  "details": "Blocks: [{'block': 'Block_A', 'block_id': '1', 'pr': 0.8651, 'energy_mwh': 1027.473, 'inverter_count': 5, 'is_underperforming': False}, {'block': 'Block_B', 'block_id': '2', 'pr': 0.8723, 'energy_mwh': 1035.97, 'inverter_count': 5, 'is_underperforming': False}, {'block': 'Block_C', 'block_id': '3', 'pr': 0.8723, 'energy_mwh': 1035.97, 'inverter_count': 5, 'is_underperforming': False}, {'block': 'Block_D', 'block_id': '4', 'pr': 0.8723, 'energy_mwh': 1035.97, 'inverter_count': 5, 'is_underperforming': False}]",
+  "got": "4 blocks; All matched"
+}

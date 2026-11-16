@@ -1,0 +1,4 @@
+{
+  "details": "Headline: **The data does not specify the block or rated capacity for inverter P1_Block_C_INV_03.**",
+  "got": "has_block_c=True, has_capacity=False"
+}

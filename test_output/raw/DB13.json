@@ -1,0 +1,4 @@
+{
+  "details": "Summary: {'inverter_id': 'P1_Block_A_INV_02', 'block': 'Block_A', 'plant': 'Solar Alpha', 'rated_dc_kw': 1500.0, 'rated_ac_kw': 1425.0, 'flagged_days': 1}",
+  "got": "dc=1500.0, ac=1425.0, flagged=1, rows=57, sep16_yield=0.0"
+}

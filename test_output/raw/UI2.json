@@ -1,0 +1,4 @@
+{
+  "details": "URL after click: http://localhost:5173/dashboard?plant=2&tab=plant",
+  "got": "row_count=5, navigated=True"
+}

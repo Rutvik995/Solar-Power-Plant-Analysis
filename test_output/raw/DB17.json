@@ -1,0 +1,4 @@
+{
+  "details": "Total 25 calls across 5 endpoints",
+  "got": "Cold: 2041.9ms, p50: 2036.1ms, p95: 2114.8ms"
+}

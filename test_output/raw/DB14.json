@@ -1,0 +1,4 @@
+{
+  "details": "Tested 4 invalid endpoints.",
+  "got": "StatusCodes: [('/api/dashboard/plant/999', 200), ('/api/dashboard/overview?start=2026-09-26&end=2026-09-01', 200), ('/api/dashboard/overview?start=2030-01-01&end=2030-02-01', 200), ('/api/dashboard/inverter/NON_EXISTENT_INV', 404)]"
+}

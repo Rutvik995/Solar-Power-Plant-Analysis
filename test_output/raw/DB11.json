@@ -1,0 +1,4 @@
+{
+  "details": "Weather series lengths: [26, 26, 26, 26]",
+  "got": "lengths: amb=26, mod=26, irr=26, soil=26, has_nulls=False"
+}

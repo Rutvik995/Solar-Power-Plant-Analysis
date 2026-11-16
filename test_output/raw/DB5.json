@@ -1,0 +1,4 @@
+{
+  "details": "28d prev: {'start': '2026-08-02', 'end': '2026-08-29', 'days_covered': 28, 'days_expected': 28, 'is_partial': False, 'has_data': True, 'note': None}",
+  "got": "prev_28=True, full_handling=True"
+}
