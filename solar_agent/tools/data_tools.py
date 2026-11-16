@@ -244,278 +244,347 @@ class ResolveDateRangeSchema(BaseModel):
     model_config = ConfigDict(extra="forbid")
     text: str
 
+
 @tool(args_schema=ResolveDateRangeSchema)
 def resolve_date_range(text: str) -> dict:
     """
     Parses natural-language date expressions into concrete start/end dates.
 
-    'Today' is defined as MAX(log_date) from the database (BR-05).
-
-    Supported expressions:
-      - "last month", "previous month"
-      - "this month"
-      - "last week", "this week"
-      - "last N days" / "past N days"  (e.g. "last 30 days")
-      - "last N months"                 (e.g. "last 3 months")
-      - "last quarter", "this quarter"
-      - "last year", "this year"
-      - "Q1 2025", "Q2 2024", etc.
-      - Explicit dates: "2025-01-01 to 2025-03-31"
-      - "all" / "all time" → full available range
-
-    Returns:
-    {
-        "start_date": "YYYY-MM-DD",
-        "end_date":   "YYYY-MM-DD",
-        "today":      "YYYY-MM-DD",
-        "assumption": "Interpreted 'last month' as 2025-07-01 to 2025-07-31"
-    }
+    Deterministic resolver in code, relative to MAX(log_date) and clamped to the
+    available data range, with a note when clamped.
     """
     today = q.get_max_log_date()
+    min_db = q.get_min_log_date()
+
     t = text.strip().lower()
+    # Normalize unicode hyphens/dashes
+    for ch in ("\u2011", "\u2013", "\u2014", "\u00ad"):
+        t = t.replace(ch, "-")
 
     def _fmt(d: date) -> str:
         return d.isoformat()
+
+    def _fmt_short(s: date, e: date) -> str:
+        return f"{s.day} {s.strftime('%b')} to {e.day} {e.strftime('%b')}"
 
     def _first_of_month(d: date) -> date:
         return d.replace(day=1)
 
     def _last_of_month(d: date) -> date:
-        # Go to first of next month, then back 1 day
         if d.month == 12:
             return d.replace(year=d.year + 1, month=1, day=1) - timedelta(days=1)
         return d.replace(month=d.month + 1, day=1) - timedelta(days=1)
 
-    def _parse(t: str) -> tuple[date, date, str]:
-        start: date
-        end: date = today
-        assumption: str
+    _MONTH_MAP = {
+        "jan": 1, "january": 1, "feb": 2, "february": 2, "mar": 3, "march": 3,
+        "apr": 4, "april": 4, "may": 5, "jun": 6, "june": 6, "jul": 7, "july": 7,
+        "aug": 8, "august": 8, "sep": 9, "sept": 9, "september": 9,
+        "oct": 10, "october": 10, "nov": 11, "november": 11, "dec": 12, "december": 12,
+    }
+    _MONTH_PATTERN = (
+        r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
+        r"jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)"
+    )
 
-        # --- Explicit YYYY-MM-DD to YYYY-MM-DD ---
-        explicit = re.search(
-            r"(\d{4}-\d{2}-\d{2})\s+(?:to|through|–|-)\s+(\d{4}-\d{2}-\d{2})", t
-        )
+    def _infer_year(month_num: int) -> int:
+        for yr in (today.year, today.year - 1, today.year + 1):
+            try:
+                candidate_start = date(yr, month_num, 1)
+                candidate_end = _last_of_month(candidate_start)
+                if not (candidate_end < min_db or candidate_start > today):
+                    return yr
+            except ValueError:
+                pass
+        return today.year
+
+    _WHOLE_RANGE_PHRASES = [
+        "whole dataset", "entire dataset", "whole data", "entire data",
+        "whole period", "entire period", "all time", "all data",
+        "full period", "full dataset", "overall", "so far", "in total",
+    ]
+
+    def _parse(t_in: str):
+        swapped = False
+        has_period_phrase = True
+
+        # 1. Whole dataset phrases
+        t_clean = re.sub(r"\b(the|for|show|me|data|in|plant|inverter|block)\b", "", t_in).strip()
+        if t_clean in ("all", "all time", "overall", "ever", "so far", "in total") or any(p in t_in for p in _WHOLE_RANGE_PHRASES) or re.search(r"\b(ever|overall)\b", t_in):
+            start = min_db
+            end = today
+            assumption = f"Interpreted '{text}' as full data range: {_fmt(start)} to {_fmt(end)}."
+            return start, end, assumption, has_period_phrase, swapped
+
+        # 2. yesterday
+        if re.search(r"\byesterday\b", t_in):
+            start = today - timedelta(days=1)
+            end = start
+            assumption = f"Interpreted 'yesterday' as {_fmt(start)}."
+            return start, end, assumption, has_period_phrase, swapped
+
+        # 3. Explicit ISO range: 2026-09-01 to 2026-09-26
+        explicit = re.search(r"(\d{4}-\d{2}-\d{2})\s*(?:to|through|-)\s*(\d{4}-\d{2}-\d{2})", t_in)
         if explicit:
             start = date.fromisoformat(explicit.group(1))
             end = date.fromisoformat(explicit.group(2))
-            assumption = f"Explicit date range: {_fmt(start)} to {_fmt(end)}"
-            return start, end, assumption
+            if start > end:
+                start, end = end, start
+                swapped = True
+            note = " (reversed dates swapped, with a note)" if swapped else ""
+            assumption = f"Explicit date range: {_fmt(start)} to {_fmt(end)}{note}."
+            return start, end, assumption, has_period_phrase, swapped
 
-        # --- Month expressions & single dates ---
-        month_map = {
-            "jan": 1, "january": 1, "feb": 2, "february": 2, "mar": 3, "march": 3,
-            "apr": 4, "april": 4, "may": 5, "jun": 6, "june": 6, "jul": 7, "july": 7,
-            "aug": 8, "august": 8, "sep": 9, "sept": 9, "september": 9, "oct": 10, "october": 10,
-            "nov": 11, "november": 11, "dec": 12, "december": 12,
-        }
-
-        # Single date: "16 Sept 2026", "16 September 2026", "16th September 2026"
-        single_day_match = re.search(
-            r"\b(\d{1,2})(?:st|nd|rd|th)?\s+(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+(\d{4})\b",
-            t,
+        # 4. "1 to 15 September" / "from 20 Sept to 10 Sept" (reversed dates swapped, with a note)
+        cross_month_range = re.search(
+            r"(?:from\s+)?(\d{1,2})(?:st|nd|rd|th)?\s+(" + _MONTH_PATTERN +
+            r")\s+(?:to|-)\s+(\d{1,2})(?:st|nd|rd|th)?\s+(" + _MONTH_PATTERN +
+            r")(?:\s+(\d{4}))?",
+            t_in,
         )
-        if single_day_match:
-            d_num = int(single_day_match.group(1))
-            m_name = single_day_match.group(2).lower()
-            year = int(single_day_match.group(3))
-            month_num = month_map.get(m_name, 9)
-            start = date(year, month_num, d_num)
-            end = start
-            assumption = f"Interpreted '{text}' as {d_num} {m_name.capitalize()} {year}: {_fmt(start)} to {_fmt(end)}"
-            return start, end, assumption
+        if cross_month_range:
+            d1 = int(cross_month_range.group(1))
+            m1_name = cross_month_range.group(2).lower()
+            d2 = int(cross_month_range.group(3))
+            m2_name = cross_month_range.group(4).lower()
+            yr_str = cross_month_range.group(5)
+            m1_num = _MONTH_MAP.get(m1_name, 1)
+            m2_num = _MONTH_MAP.get(m2_name, 1)
+            year = int(yr_str) if yr_str else _infer_year(m1_num)
+            start = date(year, m1_num, d1)
+            end = date(year, m2_num, d2)
+            if start > end:
+                start, end = end, start
+                swapped = True
+            note = " (reversed dates swapped, with a note)" if swapped else ""
+            assumption = f"Interpreted '{text}' as {_fmt(start)} to {_fmt(end)}{note}."
+            return start, end, assumption, has_period_phrase, swapped
 
-        # Single date: "Sept 16 2026", "September 16, 2026"
-        single_day_rev_match = re.search(
-            r"\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+(\d{1,2})(?:st|nd|rd|th)?(?:,)?\s+(\d{4})\b",
-            t,
+        same_month_range = re.search(
+            r"(?:from\s+)?(\d{1,2})(?:st|nd|rd|th)?\s+(?:to|-)\s+(\d{1,2})(?:st|nd|rd|th)?\s+(" +
+            _MONTH_PATTERN + r")(?:\s+(\d{4}))?",
+            t_in,
         )
-        if single_day_rev_match:
-            m_name = single_rev = single_day_rev_match.group(1).lower()
-            d_num = int(single_day_rev_match.group(2))
-            year = int(single_day_rev_match.group(3))
-            month_num = month_map.get(m_name, 9)
-            start = date(year, month_num, d_num)
-            end = start
-            assumption = f"Interpreted '{text}' as {d_num} {m_name.capitalize()} {year}: {_fmt(start)} to {_fmt(end)}"
-            return start, end, assumption
+        if same_month_range:
+            d1 = int(same_month_range.group(1))
+            d2 = int(same_month_range.group(2))
+            m_name = same_month_range.group(3).lower()
+            yr_str = same_month_range.group(4)
+            m_num = _MONTH_MAP.get(m_name, 9)
+            year = int(yr_str) if yr_str else _infer_year(m_num)
+            if d1 > d2:
+                d1, d2 = d2, d1
+                swapped = True
+            start = date(year, m_num, d1)
+            end = date(year, m_num, d2)
+            note = " (reversed dates swapped, with a note)" if swapped else ""
+            assumption = f"Interpreted '{text}' as {_fmt(start)} to {_fmt(end)}{note}."
+            return start, end, assumption, has_period_phrase, swapped
 
-        # Single ISO date: "2026-09-16"
-        single_iso = re.search(r"\b(\d{4}-\d{2}-\d{2})\b", t)
+        # 5. Single day with year: "16 September 2026", "on 16 Sept 2026", "Sept 16 2026"
+        single_day_yr = re.search(
+            r"(?:on\s+)?(\d{1,2})(?:st|nd|rd|th)?\s+(" + _MONTH_PATTERN + r")\s+(\d{4})",
+            t_in,
+        )
+        if single_day_yr:
+            d_num = int(single_day_yr.group(1))
+            m_name = single_day_yr.group(2).lower()
+            year = int(single_day_yr.group(3))
+            start = date(year, _MONTH_MAP[m_name], d_num)
+            end = start
+            assumption = f"Interpreted '{text}' as single day {_fmt(start)}."
+            return start, end, assumption, has_period_phrase, swapped
+
+        single_day_mdy = re.search(
+            r"(?:on\s+)?(" + _MONTH_PATTERN + r")\s+(\d{1,2})(?:st|nd|rd|th)?(?:,)?\s+(\d{4})",
+            t_in,
+        )
+        if single_day_mdy:
+            m_name = single_day_mdy.group(1).lower()
+            d_num = int(single_day_mdy.group(2))
+            year = int(single_day_mdy.group(3))
+            start = date(year, _MONTH_MAP[m_name], d_num)
+            end = start
+            assumption = f"Interpreted '{text}' as single day {_fmt(start)}."
+            return start, end, assumption, has_period_phrase, swapped
+
+        # 6. Single day WITHOUT year: "16 September", "on 16 Sept" (missing year inferred)
+        single_day_noyr = re.search(
+            r"(?:on\s+)?(\d{1,2})(?:st|nd|rd|th)?\s+(" + _MONTH_PATTERN + r")\b",
+            t_in,
+        )
+        if single_day_noyr:
+            d_num = int(single_day_noyr.group(1))
+            m_name = single_day_noyr.group(2).lower()
+            m_num = _MONTH_MAP[m_name]
+            year = _infer_year(m_num)
+            start = date(year, m_num, d_num)
+            end = start
+            assumption = f"Interpreted '{text}' as single day {_fmt(start)} (year {year} inferred)."
+            return start, end, assumption, has_period_phrase, swapped
+
+        single_day_md_noyr = re.search(
+            r"(?:on\s+)?(" + _MONTH_PATTERN + r")\s+(\d{1,2})(?:st|nd|rd|th)?\b",
+            t_in,
+        )
+        if single_day_md_noyr:
+            m_name = single_day_md_noyr.group(1).lower()
+            d_num = int(single_day_md_noyr.group(2))
+            m_num = _MONTH_MAP[m_name]
+            year = _infer_year(m_num)
+            start = date(year, m_num, d_num)
+            end = start
+            assumption = f"Interpreted '{text}' as single day {_fmt(start)} (year {year} inferred)."
+            return start, end, assumption, has_period_phrase, swapped
+
+        # 7. Single ISO date: "2026-09-16"
+        single_iso = re.search(r"\b(\d{4}-\d{2}-\d{2})\b", t_in)
         if single_iso:
             start = date.fromisoformat(single_iso.group(1))
             end = start
-            assumption = f"Interpreted '{text}' as {_fmt(start)}"
-            return start, end, assumption
+            assumption = f"Interpreted '{text}' as single day {_fmt(start)}."
+            return start, end, assumption, has_period_phrase, swapped
 
-        # Month expressions: "September 2026", "aug 2026"
-        month_match = re.search(
-            r"\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+(\d{4})\b",
-            t,
-        )
-        if month_match:
-            m_name = month_match.group(1).lower()
-            year = int(month_match.group(2))
-            month_num = month_map[m_name]
-            start = date(year, month_num, 1)
+        # 8. Month + year: "September 2026", "Sept 2026", "aug 2026"
+        month_yr = re.search(r"\b(" + _MONTH_PATTERN + r")\s+(\d{4})\b", t_in)
+        if month_yr:
+            m_name = month_yr.group(1).lower()
+            year = int(month_yr.group(2))
+            m_num = _MONTH_MAP[m_name]
+            start = date(year, m_num, 1)
             end = _last_of_month(start)
-            assumption = f"Interpreted '{text}' as {m_name.capitalize()} {year}: {_fmt(start)} to {_fmt(end)}"
-            return start, end, assumption
+            assumption = f"Interpreted '{text}' as {m_name.capitalize()} {year}: {_fmt(start)} to {_fmt(end)}."
+            return start, end, assumption, has_period_phrase, swapped
 
-        # --- Quarter expressions: "Q1 2025", "q2 2024" ---
-        quarter_match = re.search(r"q([1-4])\s+(\d{4})", t)
+        # 9. Quarter: "Q1 2026", "q3 2026"
+        quarter_match = re.search(r"\bq([1-4])\s+(\d{4})\b", t_in)
         if quarter_match:
             q_num = int(quarter_match.group(1))
             year = int(quarter_match.group(2))
             q_start_month = (q_num - 1) * 3 + 1
             start = date(year, q_start_month, 1)
-            end_month = q_start_month + 2
-            end = _last_of_month(date(year, end_month, 1))
-            assumption = f"Interpreted '{text}' as Q{q_num} {year}: {_fmt(start)} to {_fmt(end)}"
-            return start, end, assumption
+            end = _last_of_month(date(year, q_start_month + 2, 1))
+            assumption = f"Interpreted '{text}' as Q{q_num} {year}: {_fmt(start)} to {_fmt(end)}."
+            return start, end, assumption, has_period_phrase, swapped
 
-        # --- "last N days" / "past N days" ---
-        n_days_match = re.search(r"(?:last|past)\s+(\d+)\s+days?", t)
-        if n_days_match:
-            n = int(n_days_match.group(1))
-            start = today - timedelta(days=n - 1)
-            end = today
-            assumption = f"Interpreted '{text}' as last {n} days: {_fmt(start)} to {_fmt(end)}"
-            return start, end, assumption
-
-        # --- "last N months" ---
-        n_months_match = re.search(r"(?:last|past)\s+(\d+)\s+months?", t)
-        if n_months_match:
-            n = int(n_months_match.group(1))
-            # Go back n months from first of this month
-            this_month_first = _first_of_month(today)
-            month = this_month_first.month - n
-            year = this_month_first.year + (month - 1) // 12
-            month = ((month - 1) % 12) + 1
-            start = date(year, month, 1)
-            end = today
-            assumption = f"Interpreted '{text}' as last {n} months: {_fmt(start)} to {_fmt(end)}"
-            return start, end, assumption
-
-        # --- "last month" / "previous month" ---
-        if any(p in t for p in ("last month", "previous month")):
+        # 10. "last month" / "previous month" (previous full calendar month before MAX(log_date), stated in answer)
+        if any(p in t_in for p in ("last month", "previous month")):
             first_this = _first_of_month(today)
             end = first_this - timedelta(days=1)
             start = _first_of_month(end)
-            assumption = f"Interpreted '{text}' as last month: {_fmt(start)} to {_fmt(end)}"
-            return start, end, assumption
+            assumption = f"Interpreted 'last month' as previous calendar month {start.strftime('%B %Y')}: {_fmt(start)} to {_fmt(end)}."
+            return start, end, assumption, has_period_phrase, swapped
 
-        # --- "this month" ---
-        if "this month" in t:
+        # 11. "this month"
+        if "this month" in t_in:
             start = _first_of_month(today)
             end = today
-            assumption = f"Interpreted '{text}' as this month: {_fmt(start)} to {_fmt(end)}"
-            return start, end, assumption
+            assumption = f"Interpreted 'this month' as {_fmt(start)} to {_fmt(end)}."
+            return start, end, assumption, has_period_phrase, swapped
 
-        # --- "last week" ---
-        if "last week" in t or "previous week" in t:
-            # ISO week: Monday–Sunday
-            days_since_monday = today.weekday()  # 0=Mon
-            last_sunday = today - timedelta(days=days_since_monday + 1)
-            last_monday = last_sunday - timedelta(days=6)
-            start = last_monday
-            end = last_sunday
-            assumption = f"Interpreted '{text}' as last week: {_fmt(start)} to {_fmt(end)}"
-            return start, end, assumption
-
-        # --- "this week" ---
-        if "this week" in t:
-            days_since_monday = today.weekday()
-            start = today - timedelta(days=days_since_monday)
+        # 12. "last N days" / "past N days"
+        n_days = re.search(r"\b(?:last|past)\s+(\d+)\s+days?\b", t_in)
+        if n_days:
+            n = int(n_days.group(1))
+            start = today - timedelta(days=n - 1)
             end = today
-            assumption = f"Interpreted '{text}' as this week: {_fmt(start)} to {_fmt(end)}"
-            return start, end, assumption
+            assumption = f"Interpreted '{text}' as last {n} days: {_fmt(start)} to {_fmt(end)}."
+            return start, end, assumption, has_period_phrase, swapped
 
-        # --- "last quarter" ---
-        if "last quarter" in t or "previous quarter" in t:
-            current_q = (today.month - 1) // 3 + 1
-            if current_q == 1:
-                q_num = 4
-                year = today.year - 1
-            else:
-                q_num = current_q - 1
-                year = today.year
-            q_start_month = (q_num - 1) * 3 + 1
-            start = date(year, q_start_month, 1)
-            end = _last_of_month(date(year, q_start_month + 2, 1))
-            assumption = f"Interpreted '{text}' as Q{q_num} {year}: {_fmt(start)} to {_fmt(end)}"
-            return start, end, assumption
-
-        # --- "this quarter" ---
-        if "this quarter" in t:
-            current_q = (today.month - 1) // 3 + 1
-            q_start_month = (current_q - 1) * 3 + 1
-            start = date(today.year, q_start_month, 1)
+        # 13. "last N weeks" / "past N weeks"
+        n_weeks = re.search(r"\b(?:last|past)\s+(\d+)\s+weeks?\b", t_in)
+        if n_weeks:
+            n = int(n_weeks.group(1))
+            start = today - timedelta(days=n * 7 - 1)
             end = today
-            assumption = f"Interpreted '{text}' as this quarter (Q{current_q}): {_fmt(start)} to {_fmt(end)}"
-            return start, end, assumption
+            assumption = f"Interpreted '{text}' as last {n} weeks: {_fmt(start)} to {_fmt(end)}."
+            return start, end, assumption, has_period_phrase, swapped
 
-        # --- "last year" ---
-        if "last year" in t or "previous year" in t:
-            start = date(today.year - 1, 1, 1)
-            end = date(today.year - 1, 12, 31)
-            assumption = f"Interpreted '{text}' as {today.year - 1}: {_fmt(start)} to {_fmt(end)}"
-            return start, end, assumption
-
-        # --- "this year" ---
-        if "this year" in t:
-            start = date(today.year, 1, 1)
+        # 14. "last N months"
+        n_months = re.search(r"\b(?:last|past)\s+(\d+)\s+months?\b", t_in)
+        if n_months:
+            n = int(n_months.group(1))
+            first_this = _first_of_month(today)
+            mo = first_this.month - n
+            yr = first_this.year + (mo - 1) // 12
+            mo = ((mo - 1) % 12) + 1
+            start = date(yr, mo, 1)
             end = today
-            assumption = f"Interpreted '{text}' as this year: {_fmt(start)} to {_fmt(end)}"
-            return start, end, assumption
+            assumption = f"Interpreted '{text}' as last {n} months: {_fmt(start)} to {_fmt(end)}."
+            return start, end, assumption, has_period_phrase, swapped
 
-        # --- "all" / "all time" ---
-        if t in ("all", "all time", "all data", "full period"):
-            start = q.get_min_log_date()
+        # 15. "last week" / "this week"
+        if "last week" in t_in or "previous week" in t_in:
+            dsm = today.weekday()
+            last_sun = today - timedelta(days=dsm + 1)
+            last_mon = last_sun - timedelta(days=6)
+            assumption = f"Interpreted 'last week' as {_fmt(last_mon)} to {_fmt(last_sun)}."
+            return last_mon, last_sun, assumption, has_period_phrase, swapped
+
+        if "this week" in t_in:
+            dsm = today.weekday()
+            start = today - timedelta(days=dsm)
             end = today
-            assumption = f"Interpreted '{text}' as full available range: {_fmt(start)} to {_fmt(end)}"
-            return start, end, assumption
+            assumption = f"Interpreted 'this week' as {_fmt(start)} to {_fmt(end)}."
+            return start, end, assumption, has_period_phrase, swapped
 
-        # --- Fallback: default to last 30 days ---
+        # 16. Bare month: "in August", "September", "sept", "sep" (missing year inferred)
+        bare_month = re.search(r"(?:\b(?:in|for|during)\s+)?\b(" + _MONTH_PATTERN + r")\b", t_in)
+        if bare_month:
+            m_name = bare_month.group(1).lower()
+            m_num = _MONTH_MAP[m_name]
+            year = _infer_year(m_num)
+            start = date(year, m_num, 1)
+            end = _last_of_month(start)
+            assumption = f"Interpreted '{text}' as {m_name.capitalize()} {year} (year {year} inferred): {_fmt(start)} to {_fmt(end)}."
+            return start, end, assumption, has_period_phrase, swapped
+
+        # 17. Default fallback: no period phrase found
+        has_period_phrase = False
         start = today - timedelta(days=29)
-        assumption = (
-            f"Could not parse '{text}'; defaulted to last 30 days: {_fmt(start)} to {_fmt(end)}. "
-            "Please re-state the date range for accuracy."
-        )
-        return start, end, assumption
+        end = today
+        assumption = f"No period given, so I used the last 30 days, {_fmt_short(start, end)}"
+        return start, end, assumption, has_period_phrase, swapped
 
-    raw_start, raw_end, assumption = _parse(t)
-    
-    # Clamp to actual DB bounds
-    min_db = q.get_min_log_date()
-    max_db = today
-    
+    raw_start, raw_end, assumption, has_period_phrase, swapped = _parse(t)
+
+    # Clamping & out of range check
+    clamped = False
+    out_of_range = False
     warnings_list = []
-    
-    # Check if totally out of bounds
-    if raw_end < min_db or raw_start > max_db:
-        warnings_list.append(f"Requested range ({_fmt(raw_start)} to {_fmt(raw_end)}) has no data. Clamped to {_fmt(min_db)} to {_fmt(max_db)}.")
-        raw_start = min_db
-        raw_end = max_db
+
+    if raw_end < min_db or raw_start > today:
+        out_of_range = True
+        clamped = True
+        warnings_list.append(
+            f"Requested period ({_fmt(raw_start)} to {_fmt(raw_end)}) is outside available data range "
+            f"({_fmt(min_db)} to {_fmt(today)}). No data available."
+        )
     else:
         if raw_start < min_db:
-            warnings_list.append(f"Requested start date {_fmt(raw_start)} predates available data. Clamped to {_fmt(min_db)}.")
+            clamped = True
+            warnings_list.append(f"Start date {_fmt(raw_start)} predates available data; clamped to {_fmt(min_db)}.")
             raw_start = min_db
-        if raw_end > max_db:
-            warnings_list.append(f"Requested end date {_fmt(raw_end)} exceeds available data. Clamped to {_fmt(max_db)}.")
-            raw_end = max_db
-            
+        if raw_end > today:
+            clamped = True
+            warnings_list.append(f"End date {_fmt(raw_end)} exceeds available data; clamped to {_fmt(today)}.")
+            raw_end = today
+
     if warnings_list:
-        assumption += " | WARNING: " + " ".join(warnings_list)
-        
+        assumption += " | " + " ".join(warnings_list)
+
     return {
-        "start_date": _fmt(raw_start), 
-        "end_date": _fmt(raw_end), 
-        "today": _fmt(today), 
-        "assumption": assumption
+        "start_date": _fmt(raw_start),
+        "end_date": _fmt(raw_end),
+        "today": _fmt(today),
+        "assumption": assumption,
+        "has_period_phrase": has_period_phrase,
+        "not_parsed": not has_period_phrase,
+        "clamped": clamped,
+        "swapped": swapped,
+        "out_of_range": out_of_range,
     }
 
 
-# ---------------------------------------------------------------------------
 # 4. run_sql_readonly — guarded SQL executor
 # ---------------------------------------------------------------------------
 

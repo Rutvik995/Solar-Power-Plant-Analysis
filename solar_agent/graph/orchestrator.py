@@ -274,31 +274,34 @@ def _normalize_scope_and_tasks(payload: dict, query: str, prev_scope: dict | Non
                 block_ids.append(bid)
 
     # 2. Normalize and clamp date range
+    resolved = None
     resolved_dates = None
     try:
         resolved = resolve_date_range.invoke({"text": query})
         if resolved and "start_date" in resolved and "end_date" in resolved:
-            if "Could not parse" not in resolved.get("assumption", ""):
+            if resolved.get("has_period_phrase", True) and not resolved.get("not_parsed", False):
                 resolved_dates = (
                     date.fromisoformat(resolved["start_date"]),
                     date.fromisoformat(resolved["end_date"]),
                 )
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("resolve_date_range failed: %s", exc)
 
-    is_undated = (resolved_dates is None)
     if resolved_dates:
         start_d, end_d = resolved_dates
+        is_undated = False
     elif prev_scope and prev_scope.get("start_date") and prev_scope.get("end_date"):
-        # Inherit date range from previous scope
+        # Inherit date range from previous scope for follow-ups without an explicit period
         p_start = prev_scope["start_date"]
         p_end = prev_scope["end_date"]
         start_d = date.fromisoformat(p_start) if isinstance(p_start, str) else p_start
         end_d = date.fromisoformat(p_end) if isinstance(p_end, str) else p_end
         is_undated = False
     else:
+        # Default last 30 days applies ONLY when there is no period phrase
         end_d = max_db
         start_d = max(min_db, max_db - timedelta(days=29))
+        is_undated = True
 
     # Clamp to actual DB bounds [min_db, max_db]
     if start_d > max_db:
@@ -328,9 +331,13 @@ def _normalize_scope_and_tasks(payload: dict, query: str, prev_scope: dict | Non
         assumptions.append(assumption_line)
 
     if is_undated:
-        undated_line = f"Undated query; defaulted to last 30 days of available data ({start_d.isoformat()} to {end_d.isoformat()})"
+        undated_line = f"No period given, so I used the last 30 days, {start_d.day} {start_d.strftime('%b')} to {end_d.day} {end_d.strftime('%b')}"
         if undated_line not in assumptions:
             assumptions.append(undated_line)
+    elif resolved and resolved.get("assumption"):
+        r_assump = resolved["assumption"]
+        if r_assump not in assumptions:
+            assumptions.append(r_assump)
 
     payload["assumptions"] = assumptions
 
@@ -553,9 +560,17 @@ class Orchestrator:
             logger.info("Orchestrator CacheMiss in replay; constructing deterministic plan for '%s'", query)
             q_lower = query.lower()
 
-            is_followup = any(kw in q_lower for kw in [
+            from solar_agent.tools.data_tools import resolve_date_range
+            q_res = resolve_date_range.invoke({"text": query})
+            has_q_period = q_res.get("has_period_phrase", False)
+            is_entity_followup = any(kw in q_lower for kw in [
                 "same for plant", "the same for plant", "repeat for plant", "what about plant", "now plant", "same for block"
             ])
+            is_period_followup = bool(prev_tasks or prev_query) and has_q_period and (
+                q_lower.startswith(("and ", "what about ", "how about ", "in ", "for ", "now "))
+                or len(q_lower.split()) <= 4
+            )
+            is_followup = is_entity_followup or is_period_followup
 
             if is_followup and (prev_tasks or prev_query):
                 inherited_agent = None

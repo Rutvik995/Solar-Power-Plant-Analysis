@@ -88,9 +88,17 @@ def detect_zero_generation(
     
     res_ref = DataStore.store(faults_df)
     
+    if len(faults_df) == 0 and "log_date" in df.columns and not df.empty:
+        d_min = pd.to_datetime(df["log_date"]).min().date()
+        d_max = pd.to_datetime(df["log_date"]).max().date()
+        period_str = f"{d_min.day} {d_min.strftime('%b')} and {d_max.day} {d_max.strftime('%b')} {d_max.year}" if d_min.year == d_max.year else f"{d_min.day} {d_min.strftime('%b')} {d_min.year} and {d_max.day} {d_max.strftime('%b')} {d_max.year}"
+        summary = f"No zero-generation events between {period_str}."
+    else:
+        summary = f"Detected {len(faults_df)} instances of unexpected zero generation."
+
     return {
-        "summary": f"Detected {len(faults_df)} instances of unexpected zero generation.",
-        "metrics": {"fault_count": len(faults_df)},
+        "summary": summary,
+        "metrics": {"fault_count": len(faults_df), "zero_generation_events": len(faults_df)},
         "data_ref": res_ref,
         "warnings": warnings,
     }

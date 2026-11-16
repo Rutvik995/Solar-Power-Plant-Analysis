@@ -67,6 +67,8 @@ RULES:
 8. Report PR as a percentage (e.g. 82.5%).
 9. FAULT EXPLANATIONS: State ONLY what the data explicitly shows (status code, zero power output, how peers performed). NEVER state or invent a root cause (e.g. "because of high temperature", "due to overheating", "communication glitch", "minor grid deviation") unless a tool output specifically supports it. Status code descriptions only list examples of possible warnings, NOT confirmed causes. Use "the data doesn't show the exact cause".
 10. PEER & WEATHER CLAIMS: If peer count is 0 or peer fields are null/missing ("n/a"), make NO claims about peer performance or weather conditions (never claim "no sunlight" or "normal weather"). If peer irradiance is 0 or null, never claim there was no sunlight or a measurement issue.
+11. NONE FOUND RULE: When no faults, zero-generation events, or issues are found, explicitly state 'No [event type] between [start] and [end]' naming the exact searched period, e.g. '**No zero-generation events between 1 Jul and 21 Oct 2026.**'
+12. TIE RULE: If the top N ranked entities have values within 0.1 point of each other (or is_tie is True in metrics), state that they are essentially equal with equivalent performance, and do not pick a single winner or rank them by name order.
 """
 
 
@@ -271,7 +273,30 @@ def build_deterministic_fallback(
         else:
             headline = f"**Fault analysis identified {flagged_count} inverter events requiring inspection.**"
     else:
-        headline = f"**Analysis completed for {plant_str}.**"
+        # Determine period string for none found
+        d_start = getattr(plan.scope, "start_date", None) if plan and plan.scope else None
+        d_end = getattr(plan.scope, "end_date", None) if plan and plan.scope else None
+        if d_start and d_end:
+            try:
+                sd = date.fromisoformat(str(d_start))
+                ed = date.fromisoformat(str(d_end))
+                period_display = f"{sd.day} {sd.strftime('%b')} and {ed.day} {ed.strftime('%b')} {ed.year}" if sd.year == ed.year else f"{sd.day} {sd.strftime('%b')} {sd.year} and {ed.day} {ed.strftime('%b')} {ed.year}"
+            except Exception:
+                period_display = f"{d_start} and {d_end}"
+        else:
+            period_display = "the evaluated period"
+
+        q_lower = query.lower()
+        is_tie_metric = any(getattr(tr, "metrics", {}).get("is_tie", False) for tr in results.values() if tr)
+
+        if is_tie_metric:
+            headline = f"**The evaluated entities are essentially equal with equivalent performance (within 0.1 point of each other).**"
+        elif any(w in q_lower for w in ["zero generation", "zero yield", "no power", "zero generation events"]):
+            headline = f"**No zero-generation events between {period_display}.**"
+        elif any(w in q_lower for w in ["fault", "faulty", "warning status", "status fault"]):
+            headline = f"**No inverter faults between {period_display}.**"
+        else:
+            headline = f"**Analysis completed for {plant_str}.**"
 
     # 2. Explanation
     if all_flagged_items:

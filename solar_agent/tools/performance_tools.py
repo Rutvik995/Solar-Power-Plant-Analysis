@@ -134,9 +134,40 @@ def rank_entities(
     df_ranked = df.sort_values(by=metric, ascending=ascending).head(top_n)
     res_ref = DataStore.store(df_ranked)
 
+    # Tie rule for lowest/highest rankings:
+    # If the top N values are within 0.1 point of each other, they are essentially equal and don't pick by name order.
+    vals = df_ranked[metric].dropna().tolist()
+    is_tie = False
+    tie_note = ""
+    metrics = {"ranked_count": len(df_ranked)}
+
+    if len(vals) >= 2:
+        v_max = max(vals)
+        v_min = min(vals)
+        spread = v_max - v_min
+        # For ratio values (e.g. PR in 0..1), 0.1 percentage point is 0.001. For percentage or absolute, threshold is 0.1.
+        thresh = 0.001 if max(abs(v_max), abs(v_min)) <= 1.0 else 0.1
+        if spread <= thresh:
+            is_tie = True
+            tie_note = (
+                f"The top {len(vals)} values are within 0.1 point of each other "
+                f"({v_min:.4f} to {v_max:.4f}) and are essentially equal; "
+                "they should not be picked or ranked by name order."
+            )
+            metrics["is_tie"] = True
+            metrics["tie_spread"] = round(float(spread), 6)
+            metrics["tie_note"] = tie_note
+
+    summary = (
+        f"The top {len(df_ranked)} entities by {metric} are essentially equal (all within 0.1 point of each other)."
+        if is_tie
+        else f"Ranked top {len(df_ranked)} by {metric} ({'ascending' if ascending else 'descending'})."
+    )
+
     return {
-        "summary": f"Ranked top {top_n} by {metric} ({'ascending' if ascending else 'descending'}).",
+        "summary": summary,
         "data_ref": res_ref,
+        "metrics": metrics,
         "warnings": [],
     }
 
